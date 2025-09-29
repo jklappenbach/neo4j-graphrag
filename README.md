@@ -226,4 +226,5 @@ This README provides comprehensive documentation covering:
 
 The README is structured to get users up and running quickly while providing enough detail for advanced usage scenarios.
 
-
+# neo4j-graphrag
+A client-server solution for GraphRAG using neo4j, specifically tailored for local LLM coding assistance.
