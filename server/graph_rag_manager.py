@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
 import neo4j
-from haystack import Pipeline
+from haystack.core.pipeline import Pipeline
 from haystack import tracing
 from haystack.components.converters import TextFileToDocument
 from haystack.components.writers import DocumentWriter
@@ -300,77 +300,120 @@ class GraphRagManagerImpl(GraphRagManager):
 
     def _load_and_activate_all_projects(self) -> None:
         for project in self._project_mgr.list_projects():
-            project_entry = _ProjectEntry(project)
-            project_entry.db_driver = GraphDatabase.driver(self._neo4j_url, auth=(self._username, self._password))
-            self._project_entries[project.project_id] = project_entry
-            # Perform incremental sync at startup
             try:
+                project_entry = _ProjectEntry(project)
+                self._project_entries[project.project_id] = project_entry
+                project_entry.db_driver = GraphDatabase.driver(self._neo4j_url, auth=(self._username, self._password))
+                self._project_entries[project.project_id] = project_entry
+                # Perform incremental sync at startup
                 self.sync_project(project.project_id, force=False)
-            except Exception:
-                logger.exception("Startup sync failed for %s", project.project_id)
+            except Exception as e:
+                logger.exception("Startup sync failed for %s, cause: %s", project.project_id, str(e))
 
     # ---------------------
     # Query API
     # ---------------------
-    def query(self, project_id: str, request_id: str, query: str, args: Dict[str, Any]) -> Dict[str, Any]:
-        try:
-            self._task_mgr.add_task(QueryTask(project_id, request_id, query, args, self.handle_query, self._task_mgr))
-            return {"ok": True, "request_id": request_id}
-        except Exception as e:
-            logger.exception("Failed to query %s, request_id: %s", query, request_id)
-            return {"ok": False, "error": str(e)}
+        def query(self, project_id: str, request_id: str, query: str, args: Dict[str, Any]) -> Dict[str, Any]:
+            try:
+                self._task_mgr.add_task(
+                    QueryTask(project_id, request_id, query, args, self.handle_query, self._task_mgr))
+                return {"ok": True, "request_id": request_id}
+            except Exception as e:
+                logger.exception("Failed to query %s, request_id: %s", query, request_id)
+                return {"ok": False, "error": str(e)}
 
-    def handle_query(self, request_id: str, project_id: str, query: str, args: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Retrieve graph-aware relevant chunks from Neo4j via Haystack and answer with a local model.
-        The retrieval leverages relationships (IMPORTS, CALLS, DEFINES) using a Cypher-aware retriever.
-        """
-        logger.info("Entering GraphRagManager.start_query query=%s", query)
-        project_entry = self._project_entries.get(project_id)
-        if not project:
-            project = self._project_mgr.get_project(project_id)
-            if not project:
+        def handle_query(self, project_id: str, request_id: str, query_str: str, args: Dict[str, Any]) -> Dict[
+            str, Any]:
+            """
+            Retrieve graph-aware relevant chunks from Neo4j via Haystack and answer with a local model.
+            The retrieval leverages relationships (IMPORTS, CALLS, DEFINES) using a Cypher-aware retriever.
+            """
+            logger.info("Entering GraphRagManager.handle_query request_id=%s query=%s", request_id, query_str)
+            project_entry = self._project_entries.get(project_id)
+            if not project_entry:
                 raise Exception('Invalid project ID provided.  Project does not exist.')
 
-        try:
-            # Embed the query
-            q_embedder = OllamaTextEmbedder(model=project.embedding_model_name, url="http://localhost:11434")
+            try:
+                # Embed the query
+                q_embedder = OllamaTextEmbedder(
+                    model=project_entry.project.embedder_model_name,
+                    url="http://localhost:11434"
+                )
 
-            # Use custom graph-aware retriever
-            retriever = GraphAwareRetriever(
-                document_store=self._document_store,
-                driver=self._system_db_driver,
-                top_k=15,
-                relationship_weight=0.3
-            )
+                # Use custom graph-aware retriever with the project-specific driver
+                retriever = GraphAwareRetriever(
+                    document_store=project_entry.document_store,
+                    driver=project_entry.db_driver,
+                    top_k=15,
+                    relationship_weight=0.3
+                )
 
-            # Local generator
-            generator = OllamaGenerator(model="llama3.1", url="http://localhost:11434")
+                # Local generator
+                generator = OllamaGenerator(model=project_entry.project.llm_model_name, url="http://localhost:11434")
 
-            # Build pipeline: embed -> retrieve -> generate
-            pipeline = Pipeline()
-            pipeline.add_component("q_embedder", q_embedder)
-            pipeline.add_component("retriever", retriever)
-            pipeline.add_component("llm", generator)
-            pipeline.connect("q_embedder.embedding", "retriever.query_embedding")
+                # Build pipeline: embed -> retrieve
+                pipeline = Pipeline()
+                pipeline.add_component("q_embedder", q_embedder)
+                pipeline.add_component("retriever", retriever)
+                pipeline.connect("q_embedder.embedding", "retriever.query_embedding")
 
-            ret = pipeline.run(data={"q_embedder": {"text": query}})
-            docs = ret.get("retriever", {}).get("documents", [])
+                # Correct v2-style run: feed data into the q_embedder
+                ret = pipeline.run(data={"q_embedder": {"text": query_str}})
 
-            # Rest of the method remains the same...
-            context = "\n\n".join(d.content for d in docs)
+                # Safely extract documents
+                retr_out = ret.get("retriever") or {}
+                docs = retr_out.get("documents") or []
 
-            prompt = f"""You are a code-aware assistant. Use the graph-related context to answer.
+                if not docs:
+                    logger.info("No documents retrieved for request_id=%s", request_id)
+                    return {
+                        "ok": True,
+                        "request_id": request_id,
+                        "result": {
+                            "answer": "No relevant documents were found for your query.",
+                            "sources": [],
+                            "context": ""
+                        }
+                    }
+
+                context = "\n\n".join(getattr(d, "content", "") for d in docs if getattr(d, "content", ""))
+
+                prompt = f"""You are a code-aware assistant. Use the graph-related context to answer.
     Context:
     {context}
 
-    Question: {query}
+    Question: {query_str}
     Answer succinctly:"""
 
-            return pipeline.run(data={"llm": {"prompt": prompt}}, include_outputs_from=["llm"])
-        except Exception as e:
-            logger.exception("Query operation failed: %s", str(e))
-            raise e
+                # Call generator directly instead of rerunning the whole pipeline
+                gen_res = generator.run(prompt=prompt)
+                # OllamaGenerator typically returns {"replies": [text, ...]}
+                replies = gen_res.get("replies") or []
+                answer = replies[0] if replies else ""
+
+                sources = []
+                for d in docs:
+                    fp = None
+                    # Try common places where file path may reside
+                    if hasattr(d, "meta") and isinstance(d.meta, dict):
+                        fp = d.meta.get("file_path") or d.meta.get("name") or d.meta.get("source")
+                    if not fp and hasattr(d, "id"):
+                        fp = str(d.id)
+                    if fp:
+                        sources.append(fp)
+
+                return {
+                    "ok": True,
+                    "request_id": request_id,
+                    "result": {
+                        "answer": answer,
+                        "sources": sources,
+                        "context": context
+                    }
+                }
+            except Exception as e:
+                logger.exception("Query operation failed request_id=%s: %s", request_id, str(e))
+                raise e
 
     def cancel_query(self, request_id: str):
         try:

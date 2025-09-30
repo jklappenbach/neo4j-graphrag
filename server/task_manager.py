@@ -147,7 +147,7 @@ class FileTask(Task):
 
 class QueryTask(Task):
     def __init__(self, request_id: str, project_id: str, query: str, args: Dict[str, Any],
-                 handler: Callable[[str, str, Dict[str, Any]], Dict[str, Any]],
+                 handler: Callable[[str, str, str, Dict[str, Any]], Dict[str, Any]],
                  task_mgr: TaskManager) -> None:
         super().__init__(request_id, project_id, task_mgr)
         self._query = query

@@ -34,7 +34,7 @@ class Project:
         self._name = name
         self._source_roots = source_roots
         self._embedder_model_name = args.get('embedder_model_name', 'default')
-        self._llm_model_name = args.get('llm_model_name', 'default')
+        self.llm_model_name = args.get('llm_model_name', 'default')
         self._query_temperature = args.get('query_temperature', 1.0)
 
     @classmethod
