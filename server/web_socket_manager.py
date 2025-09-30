@@ -3,7 +3,8 @@ import logging
 import uuid
 from typing import Any, Dict, Set
 from fastapi import WebSocket, WebSocketDisconnect
-from server.graph_rag_manager import GraphRagManager
+
+from server.server_defines import GraphRagManager
 
 logger = logging.getLogger(__name__)
 

@@ -2,7 +2,6 @@ import ast
 import logging
 import re
 from typing import Dict, Any, List, Tuple
-
 from haystack import component
 
 logger = logging.getLogger(__name__)
@@ -25,7 +24,7 @@ class CodeAwareSplitter:
         super().__init__()
         logger.info("Entering CodeAwareSplitter.__init__")
 
-    @Component.output_types(documents=List["Document"])  # type: ignore[name-defined]
+    @component.output_types(documents=List["Document"])  # type: ignore[name-defined]
     def run(self, *, text: str, ext: str, path: str) -> Dict[str, Any]:
         logger.info("Entering CodeAwareSplitter.run ext=%s path=%s", ext, path)
         # Defer import to avoid hard dependency when Haystack is unavailable

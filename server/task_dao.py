@@ -1,13 +1,13 @@
 
 """Data Access Object for Task records in Neo4j."""
 import logging
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, LiteralString
 
 import neo4j
 from neo4j import Record
 from neo4j.exceptions import Neo4jError
 
-from server.task_manager import Task, TaskStatus
+from server.server_defines import TaskStatus
 
 logger = logging.getLogger(__name__)
 
@@ -19,45 +19,45 @@ class TaskDAO:
         # Create indexes on initialization
         self.create_indexes()
 
-    def create_task_record(self, task: Task) -> bool:
+    def create_task_record(self, query: LiteralString, parameters: Dict[str, Any]) -> bool:
         """Create a Task record in Neo4j using the task's own Cypher query."""
-        logger.info("Creating task record: %s", task._request_id)
-        
         try:
+            request_id = parameters.get("request_id")
+            logger.info("Creating task record: %s", parameters.get("request_id"))
+        
             with self.driver.session() as session:
-                query, parameters = task.get_record_cypher()
                 result = session.run(query, parameters)
                 record = result.single()
                 
                 if record is not None:
-                    logger.info("Successfully created task record: %s", task._request_id)
+                    logger.info("Successfully created task record: %s", request_id)
                     return True
                 else:
-                    logger.warning("Task record creation returned no result: %s", task._request_id)
+                    logger.warning("Task record creation returned no result: %s", request_id)
                     return False
                     
         except Exception as e:
             logger.exception("Failed to create task record: %s", str(e))
             return False
 
-    def update_task_record(self, task: Task) -> bool:
+    def update_task_record(self, query: LiteralString, parameters: Dict[str, Any]) -> bool:
         """Update an existing task record in Neo4j."""
-        logger.info("Updating task record: %s", task._request_id)
-        
         try:
+            request_id = parameters.get("request_id")
+            logger.info("Updating task record: %s", parameters.get("request_id"))
+
             with self.driver.session() as session:
                 # Use a generic update query that works for all task types
-                query, parameters = task.get_record_cypher()
                 result = session.run(query, parameters)
                 record = result.single()
-                
+
                 if record is not None:
-                    logger.info("Successfully updated task record: %s", task._request_id)
+                    logger.info("Successfully updated task record: %s", request_id)
                     return True
                 else:
-                    logger.warning("Task record update returned no result: %s", task._request_id)
+                    logger.warning("Task record update returned no result: %s", request_id)
                     return False
-                
+
         except Neo4jError as e:
             logger.exception("Failed to update task record: %s", e)
             return False
@@ -189,7 +189,7 @@ class TaskDAO:
         
         try:
             with self.driver.session() as session:
-                query = """
+                query: LiteralString = """
                 MATCH (p:ProcessingStatus)
                 WHERE p.created_at < $timestamp
                 DELETE p
@@ -213,7 +213,7 @@ class TaskDAO:
         
         try:
             with self.driver.session() as session:
-                query = """
+                query: LiteralString = """
                 MATCH (p:ProcessingStatus)
                 RETURN p.status as status, 
                        p.task_type as task_type,
@@ -255,7 +255,7 @@ class TaskDAO:
         
         try:
             with self.driver.session() as session:
-                indexes = [
+                indexes: List[LiteralString] = [
                     "CREATE INDEX processing_status_request_id IF NOT EXISTS FOR (p:ProcessingStatus) ON (p.request_id)",
                     "CREATE INDEX processing_status_status IF NOT EXISTS FOR (p:ProcessingStatus) ON (p.status)",
                     "CREATE INDEX processing_status_type IF NOT EXISTS FOR (p:ProcessingStatus) ON (p.task_type)",

@@ -1,34 +1,31 @@
-
+import hashlib
 import logging
+import os
+import uuid
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
-from haystack_integrations.document_stores.neo4j import Neo4jDocumentStore  # type: ignore
-from haystack.components.embedders import OllamaTextEmbedder  # type: ignore
-from haystack.components.retrievers import CygGraphRetriever  # type: ignore
-from haystack.components.generators import OllamaGenerator  # type: ignore  # type: ignore
-from haystack import Pipeline  # type: ignore
+from typing import Any, Dict, Iterable, List
+
+import neo4j
+from haystack import Pipeline
 from haystack import tracing
 from haystack.components.converters import TextFileToDocument
-from haystack.components.embedders import SentenceTransformersDocumentEmbedder  # type: ignore
 from haystack.components.writers import DocumentWriter
-from haystack.core.component import Component  # type: ignore
-from haystack.dataclasses import Document  # type: ignore
-from haystack.document_stores import InMemoryDocumentStore  # type: ignore
 from haystack.document_stores.types import DuplicatePolicy
 from haystack.tracing.logging_tracer import LoggingTracer
-from haystack_integrations.components.embedders.ollama import OllamaDocumentEmbedder
+from haystack_integrations.components.embedders.ollama import OllamaDocumentEmbedder, OllamaTextEmbedder
 from haystack_integrations.components.generators.ollama import OllamaGenerator
 from neo4j import GraphDatabase
-from typing import Any, Dict, Iterable, List, Optional, Tuple
 from neo4j_haystack import Neo4jDocumentStore
-
-from server.code_aware_splitter import CodeAwareSplitter
-from server.code_change_handler import CodeChangeHandler
-from server.code_relationship_extractor import CodeRelationshipExtractor
 from watchdog.observers import Observer
 
-from server.task_manager import TaskManagerImpl, QueryTask, RefreshTask
+from server.code_aware_splitter import CodeAwareSplitter
+from server.code_relationship_extractor import CodeRelationshipExtractor
 from server.graph_document_expander import GraphAwareRetriever
+from server.project_manager import ProjectManagerImpl
+from server.server_defines import GraphRagManager, Project
+from server.task_manager import TaskManagerImpl, RefreshTask, QueryTask
 
 logging.getLogger("haystack").setLevel(logging.DEBUG)
 
@@ -48,50 +45,53 @@ class _ChunkRecord:
     text: str
     ext: str
 
-class GraphRagManager:
-    """
-    Graph-based RAG manager using Haystack with code-aware ingestion.
-    """
+class _ProjectEntry:
+    project: Project
+    observers: List[Observer]
+    db_driver: neo4j.Driver
+    document_store: Neo4jDocumentStore
+    document_embedder: OllamaDocumentEmbedder
+    text_converter: TextFileToDocument
+    rel_extractor: CodeRelationshipExtractor
+    retriever: GraphAwareRetriever
+    doc_splitter: CodeAwareSplitter
+    doc_writer: DocumentWriter
+    ingestion_pipeline: Pipeline
 
-    SUPPORTED_EXTS = {".html", ".js", ".css", ".py", ".json"}
+    def __init__(self, project: Project) -> None:
+        url = os.environ.get('NEO4J_URL', 'bolt://localhost:7687')
+        username = os.environ.get('NEO4j_USERNAME', 'neo4j')
+        password = os.environ.get('NEO4J_PASSWORD', 'your_neo4j_password')
 
-    def __init__(self, doc_root: str) -> None:
-        url = "bolt://localhost:7687"
-        username = "neo4j"
-        password = "your_neo4j_password"
-        database = "neo4j"
-
-        self._doc_root = Path(doc_root).expanduser().resolve()
-        self._driver = GraphDatabase.driver(url, auth=(username, password))
-        self._event_executor = TaskManagerImpl(self._driver)
-
+        self.project = project
         # Initialize Document Store and Embedder [1.2.7, 1.5.3]
-        self._document_store = Neo4jDocumentStore(
+        self.document_store = Neo4jDocumentStore(
             url=url,
             username=username,
             password=password,  # Replace with your password
-            database=database,
+            database=self.project.name,
             embedding_dim=768  # Ensure this matches your Ollama model's dimension
         )
 
         self.document_embedder = OllamaDocumentEmbedder(
-            model=self.embedder_model_name,
+            model=self.project.embedder_model_name,
             url="http://localhost:11434"
         )
 
         # Define the ingestion pipeline
-        text_converter = TextFileToDocument()
-        rel_extractor = CodeRelationshipExtractor()
-        doc_splitter = CodeAwareSplitter()
-        doc_writer = DocumentWriter(document_store=self._document_store, policy=DuplicatePolicy.OVERWRITE)
+        self.text_converter = TextFileToDocument()
+        self.rel_extractor = CodeRelationshipExtractor()
+        self.doc_splitter = CodeAwareSplitter()
+        self.doc_writer = DocumentWriter(document_store=self.document_store,
+                                        policy=DuplicatePolicy.OVERWRITE)
 
         # Create the pipeline
         self.ingestion_pipeline = Pipeline()
-        self.ingestion_pipeline.add_component("converter", text_converter)
-        self.ingestion_pipeline.add_component("splitter", doc_splitter)
-        self.ingestion_pipeline.add_component("extractor", rel_extractor)
+        self.ingestion_pipeline.add_component("converter", self.text_converter)
+        self.ingestion_pipeline.add_component("splitter", self.doc_splitter)
+        self.ingestion_pipeline.add_component("extractor", self.rel_extractor)
         self.ingestion_pipeline.add_component("embedder", self.document_embedder)
-        self.ingestion_pipeline.add_component("writer", doc_writer)
+        self.ingestion_pipeline.add_component("writer", self.doc_writer)
 
         # Link the components
         self.ingestion_pipeline.connect("converter.documents", "splitter.documents")
@@ -99,158 +99,247 @@ class GraphRagManager:
         self.ingestion_pipeline.connect("extractor.documents", "embedder.documents")
         self.ingestion_pipeline.connect("embedder.documents", "writer.documents")
 
-        # Auto-ingest all supported files under doc_root
-        try:
-            self._add_path(self._doc_root)
-        except Exception:
-            logger.exception("Auto-ingest failed during initialization")
+class GraphRagManagerImpl(GraphRagManager):
+    """
+    Graph-based RAG manager using Haystack with code-aware ingestion.
+    """
 
-        self._observer = Observer()
-        self.code_change_handler = CodeChangeHandler(self)
-        self._observer.schedule(self.code_change_handler, self._doc_root.as_posix(), recursive=True)
-        self._observer.daemon = True
-        self._observer.start()
-        logger.info("Filesystem watcher started on %s", self._doc_root.as_posix())
+    def __init__(self) -> None:
+        self._neo4j_url = os.environ.get('NEO4J_URL', 'bolt://localhost:7687')
+        self._username = os.environ.get('NEO4j_USERNAME', 'neo4j')
+        self._password = os.environ.get('NEO4J_PASSWORD', 'your_neo4j_password')
+        database = os.environ.get('NEO4J_DB_NAME', 'graph-rag')
+
+        self._system_db_driver = GraphDatabase.driver(self._neo4j_url, auth=(self._username, self._password))
+        self._task_mgr = TaskManagerImpl(self._system_db_driver)
+        self._project_mgr = ProjectManagerImpl(self._system_db_driver)
+        self._project_entries: dict[str, _ProjectEntry] = {}
 
     # ---------------------
-    # Basic API
+    # Hash utilities and metadata
     # ---------------------
+    def _compute_file_hash(self, file_path: Path) -> str:
+        sha256_hash = hashlib.sha256()
+        with open(file_path, "rb") as f:
+            for byte_block in iter(lambda: f.read(8192), b""):
+                sha256_hash.update(byte_block)
+        return sha256_hash.hexdigest()
 
-    def list_documents(self, request_id: str) -> List[str]:
-        logger.info("Entering GraphRagManager.list_documents, request_id=%s", request_id)
-        return [str(path) for path in self._iter_code_files()]
+    def _get_tracked_files_with_hashes(self, project_id: str) -> Dict[str, str]:
+        project_entry = self._project_entries.get(project_id)
+        if not project_entry:
+            raise ValueError(f"Project {project_id} not found")
+        tracked: Dict[str, str] = {}
+        with project_entry.db_driver.session(database=project_entry.project.name) as session:
+            res = session.run("""
+                MATCH (d:Document)
+                WHERE d.file_path IS NOT NULL
+                RETURN d.file_path AS file_path, d.content_hash AS content_hash
+            """)
+            for r in res:
+                tracked[r["file_path"]] = r.get("content_hash") or ""
+        return tracked
 
-    def refresh_documents(self, request_id: str) -> Dict[str, Any]:
-        logger.info("Entering GraphRagManager.clear_documents, request_id: %s", request_id)
+    def _store_file_metadata(self, project_id: str, file_path: Path, content_hash: str) -> None:
+        project_entry = self._project_entries.get(project_id)
+        if not project_entry:
+            raise ValueError(f"Project {project_id} not found")
+        stat = file_path.stat()
+        with project_entry.db_driver.session(database=project_entry.project.name) as session:
+            session.run("""
+                MERGE (d:Document {file_path: $file_path})
+                SET d.content_hash = $content_hash,
+                    d.last_synced_at = timestamp(),
+                    d.last_modified_at = $last_modified_at,
+                    d.file_size = $file_size
+            """, file_path=file_path.as_posix(),
+                 content_hash=content_hash,
+                 last_modified_at=int(stat.st_mtime * 1000),
+                 file_size=stat.st_size)
+
+
+    # ---------------------
+    # Synchronization
+    # ---------------------
+    def sync_project(self, project_id: str, force: bool = False) -> Dict[str, Any]:
+        logger.info("Starting sync project_id=%s force=%s", project_id, force)
+        project_entry = self._project_entries.get(project_id)
+        if not project_entry:
+            raise ValueError(f"Project {project_id} not found")
+
+        if force:
+            self.handle_refresh_documents(project_id)
+            return {"mode": "full", "ok": True}
+
+        changes = {"added": [], "modified": [], "deleted": [], "unchanged": 0}
+        tracked = self._get_tracked_files_with_hashes(project_id)
+
+        current: Dict[str, str] = {}
+        for root in project_entry.project.source_roots:
+            root_path = Path(root).expanduser().resolve()
+            if not root_path.exists():
+                continue
+            for fp in self._iter_code_files(root_path):
+                try:
+                    current[fp.as_posix()] = self._compute_file_hash(fp)
+                except Exception as e:
+                    logger.exception("Hash failed for %s, cause: %s", fp, str(e))
+
+        for path_str, h in current.items():
+            if path_str not in tracked:
+                changes["added"].append(path_str)
+            elif tracked[path_str] != h:
+                changes["modified"].append(path_str)
+            else:
+                changes["unchanged"] += 1
+
+        for path_str in tracked.keys():
+            if path_str not in current:
+                changes["deleted"].append(path_str)
+
+        # Apply
+        for d in changes["deleted"]:
+            try:
+                self.handle_delete_path(project_id, Path(d))
+            except Exception:
+                logger.exception("Delete during sync failed for %s", d)
+        for a in changes["added"]:
+            try:
+                self.handle_add_path(project_id, Path(a))
+            except Exception:
+                logger.exception("Add during sync failed for %s", a)
+        for m in changes["modified"]:
+            try:
+                self.handle_update_path(project_id, Path(m))
+            except Exception:
+                logger.exception("Update during sync failed for %s", m)
+
+        return {"mode": "incremental", **{k: (len(v) if isinstance(v, list) else v) for k, v in changes.items()}}
+
+    # ---------------------
+    # Projects API
+    # ---------------------
+    def create_project(self, project: Project) -> None:
         try:
-            self._event_executor.add_task(RefreshTask(request_id, self._refresh_documents()))
-            return {"ok": True, "request_id": request_id}
+            if self._project_entries.get(project.project_id) is not None:
+                raise Exception('Project already exists')
+            project_entry = _ProjectEntry(project)
+            self._project_entries[project.project_id] = project_entry
+            project_entry.db_driver = GraphDatabase.driver(self._neo4j_url, auth=(self._username, self._password))
+            self._project_mgr.create_project(project)
+            self._create_project_observers(project_entry)
+            for path_str in project.source_roots:
+                path = Path(path_str)
+                self.handle_add_path(project.project_id, path)
         except Exception as e:
-            logger.exception("Failed to refresh documents, request_id: %s", request_id)
-            return {"ok": False, "error": str(e)}
+            logger.exception("Failed to create project %s: %s", project.project_id, str(e))
 
-    def query(self, request_id: str, query: str) -> Dict[str, Any]:
+    def delete_project(self, project_id: str) -> Dict[str, Any]:
         try:
-            self._event_executor.add_task(QueryTask(request_id, query))
+            entry = self._project_entries.get(project_id)
+            if entry:
+                for obs in entry.observers or []:
+                    try:
+                        obs.stop()
+                        obs.join(timeout=1)
+                    except Exception:
+                        pass
+                self._project_entries.pop(project_id, None)
+            return self._project_mgr.delete_project(project_id)
+        except Exception as e:
+            logger.exception("Failed to delete project %s: %s", project_id, str(e))
+            raise
+
+    def update_project(self, project_id: str, name: str | None = None, source_roots: List[str] | None = None, args: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        try:
+            updated = self._project_mgr.update_project(project_id, name=name, source_roots=source_roots, args=args)
+            # Reload entry in memory
+            proj = self._project_mgr.get_project(project_id)
+            if proj:
+                entry = self._project_entries.get(project_id)
+                if entry is None:
+                    entry = _ProjectEntry(proj)
+                    entry.db_driver = GraphDatabase.driver(self._neo4j_url, auth=(self._username, self._password))
+                    self._project_entries[project_id] = entry
+                else:
+                    entry.project = proj
+                # Recreate observers for new roots
+                for obs in entry.observers or []:
+                    try:
+                        obs.stop(); obs.join(timeout=1)
+                    except Exception:
+                        pass
+                entry.observers = []
+                # Sync after update
+                self.sync_project(project_id, force=False)
+            return updated
+        except Exception as e:
+            logger.exception("Failed to update project %s: %s", project_id, str(e))
+            raise
+
+    def list_projects(self) -> List[Project]:
+        return self._project_mgr.list_projects()
+
+    def get_project(self, project_id: str) -> Project | None:
+        return self._project_mgr.get_project(project_id)
+
+    def _create_project_observers(self, project_entry: _ProjectEntry) -> None:
+        if len(project_entry.observers) > 0:
+            for observer in project_entry.observers:
+                observer.stop()
+                observer.join()
+
+        for path_str in project_entry.project.source_roots:
+            path = Path(path_str)
+            observer = Observer()
+            observer.schedule(self, path.as_posix(), recursive=True)
+            observer.daemon = True
+            observer.start()
+            project_entry.observers.append(observer)
+            logger.info("Filesystem watcher started on %s", path.as_posix())
+
+    def _load_and_activate_all_projects(self) -> None:
+        for project in self._project_mgr.list_projects():
+            project_entry = _ProjectEntry(project)
+            project_entry.db_driver = GraphDatabase.driver(self._neo4j_url, auth=(self._username, self._password))
+            self._project_entries[project.project_id] = project_entry
+            # Perform incremental sync at startup
+            try:
+                self.sync_project(project.project_id, force=False)
+            except Exception:
+                logger.exception("Startup sync failed for %s", project.project_id)
+
+    # ---------------------
+    # Query API
+    # ---------------------
+    def query(self, project_id: str, request_id: str, query: str, args: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            self._task_mgr.add_task(QueryTask(project_id, request_id, query, args, self.handle_query, self._task_mgr))
             return {"ok": True, "request_id": request_id}
         except Exception as e:
             logger.exception("Failed to query %s, request_id: %s", query, request_id)
             return {"ok": False, "error": str(e)}
 
-    def cancel_query(self, request_id: str):
-        try:
-            self._event_executor.cancel_task(request_id)
-            return {"ok": True, "request_id": request_id}
-        except Exception as e:
-            logger.exception("Failed to cancel request_id: %s", request_id)
-            return {"ok": False, "error": str(e)}
-
-    def _add_path(self, path: Path) -> None:
-        logger.info("Entering GraphRagManager.ingest_file file_path=%s", path)
-        try:
-            code_files = []
-
-            if not path.exists() or not path.is_file():
-                return
-
-            if path.is_dir():
-                code_files.append(list(self._iter_code_files(path)))
-            else:
-                code_files.append(path)
-
-            self.ingestion_pipeline.run({"converter": {"sources": code_files}})
-            self._create_code_relationships()
-            print("Nodes created successfully.")
-        except Exception as e:
-            logger.exception("Ingestion failed for file %s", path)
-            raise e
-        return
-
-    def _update_path(self, path: Path) -> None:
-        try:
-            self._delete_path(path)
-            self._add_path(path)
-        except Exception as e:
-            logger.exception("Update failed for file %s", path)
-            raise e
-        return
-
-    def _delete_path(self, path: Path) -> None:
-        """
-        If the path is a directory, delete every document under it from the store,
-        along with all the relationships.  For each subdirectory, recursively call
-        this method.
-        """
-        logger.info("Entering GraphRagManager.delete_path path: %s", path)
-        try:
-            target = Path(path).expanduser().resolve()
-        except Exception as e:
-            logger.exception("Invalid path provided to delete_path: %s", path, e)
-            raise e
-
-        if not target.exists():
-            logger.warning("Path does not exist, nothing to delete: %s", target.as_posix())
-            raise FileNotFoundError()
-
-        # If directory: traverse and delete all supported files under it
-        if target.is_dir():
-            for p in target.rglob("*"):
-                if p.is_file() and p.suffix.lower() in self.SUPPORTED_EXTS or p.is_dir():
-                    self.delete_path(p)
-
-        # If file: remove corresponding nodes/embeddings/relationships
-        if target.is_file():
-            file_path_str = target.as_posix()
-            # Remove relationships before removing the node
-            try:
-                with self._driver.session() as s:
-                    # Delete Chunk nodes contained by the Document, then the Document itself.
-                    s.run(
-                        """
-                        MATCH (d:Document {file_path: $path})
-                        OPTIONAL MATCH (d)-[:CONTAINS]->(c:Chunk)
-                        DETACH DELETE c, d
-                        """,
-                        {"path": file_path_str},
-                    )
-            except Exception as e:
-                logger.exception("Failed deleting document graph for %s", file_path_str)
-                raise e
-
-            # Then remove the node itself
-            try:
-                self._document_store.delete_documents([file_path_str])
-            except Exception as e:
-                logger.debug("Document store deletion attempt skipped/failed for %s", file_path_str)
-                raise e
-
-    def _list_documents(self) -> List[str]:
-        try:
-            return  [str(path) for path in self._iter_code_files()]
-        except Exception as e:
-            logger.exception("Failed listing documents", e)
-            raise e
-
-    def _refresh_documents(self) -> None:
-        logger.info("Entering GraphRagManager._refresh_documents")
-        self._delete_path(self._doc_root)
-        self._add_path(self._doc_root)
-
-    def _query(self, query: str) -> Dict[str, Any]:
+    def handle_query(self, request_id: str, project_id: str, query: str, args: Dict[str, Any]) -> Dict[str, Any]:
         """
         Retrieve graph-aware relevant chunks from Neo4j via Haystack and answer with a local model.
         The retrieval leverages relationships (IMPORTS, CALLS, DEFINES) using a Cypher-aware retriever.
         """
         logger.info("Entering GraphRagManager.start_query query=%s", query)
+        project_entry = self._project_entries.get(project_id)
+        if not project:
+            project = self._project_mgr.get_project(project_id)
+            if not project:
+                raise Exception('Invalid project ID provided.  Project does not exist.')
 
         try:
             # Embed the query
-            q_embedder = OllamaTextEmbedder(model="nomic-embed-text", url="http://localhost:11434")
+            q_embedder = OllamaTextEmbedder(model=project.embedding_model_name, url="http://localhost:11434")
 
             # Use custom graph-aware retriever
             retriever = GraphAwareRetriever(
                 document_store=self._document_store,
-                driver=self._driver,
+                driver=self._system_db_driver,
                 top_k=15,
                 relationship_weight=0.3
             )
@@ -283,6 +372,145 @@ class GraphRagManager:
             logger.exception("Query operation failed: %s", str(e))
             raise e
 
+    def cancel_query(self, request_id: str):
+        try:
+            self._task_mgr.cancel_task(request_id)
+            return {"ok": True, "request_id": request_id}
+        except Exception as e:
+            logger.exception("Failed to cancel request_id: %s", request_id)
+            return {"ok": False, "error": str(e)}
+
+    # ---------------------
+    # Documents API
+    # ---------------------
+
+    def list_documents(self, request_id: str) -> List[str]:
+        logger.info("Entering GraphRagManager.list_documents, request_id=%s", request_id)
+        return [str(path) for path in self._iter_code_files()]
+
+    def refresh_documents(self, request_id: str) -> Dict[str, Any]:
+        logger.info("Entering GraphRagManager.clear_documents, request_id: %s", request_id)
+        try:
+            self._task_mgr.add_task(RefreshTask(request_id, self.handle_refresh_documents()))
+            return {"ok": True, "request_id": request_id}
+        except Exception as e:
+            logger.exception("Failed to refresh documents, request_id: %s", request_id)
+            return {"ok": False, "error": str(e)}
+
+    def handle_add_path(self, project_id: str, path: Path) -> None:
+        logger.info("Entering GraphRagManager.ingest_file file_path=%s", path)
+        project_entry = self._project_entries.get(project_id)
+        ingestion_entry = self.get_ingestion_pipeline_for_project(project_entry.project)
+
+        try:
+            if not path.exists():
+                return
+            code_files: List[Path] = []
+            if path.is_dir():
+                code_files.extend(list(self._iter_code_files(path)))
+            else:
+                code_files.append(path)
+
+            if not code_files:
+                return
+
+            ingestion_entry.pipeline.run({"converter": {"sources": code_files}})
+            self._create_code_relationships()
+            for fp in code_files:
+                ch = self._compute_file_hash(fp)
+                self._store_file_metadata(project_id, fp, ch)
+            logger.info("Ingested %d files", len(code_files))
+        except Exception as e:
+            logger.exception("Ingestion failed for %s", path)
+            raise e
+
+    def handle_update_path(self, project_id: str, path: Path) -> None:
+        try:
+            self.handle_delete_path(project_id, path)
+            self.handle_add_path(project_id, path)
+        except Exception as e:
+            logger.exception("Update failed for %s", path)
+            raise e
+
+    def handle_delete_path(self, project_id: str, path: Path) -> None:
+        """
+        If the path is a directory, delete every document under it from the store,
+        along with all the relationships.  For each subdirectory, recursively call
+        this method.
+        """
+        logger.info("Entering GraphRagManager.delete_path path: %s", path)
+        project_entry = self._project_entries.get(project_id)
+        ingestion_entry = self.get_ingestion_pipeline_for_project(project_entry.project)
+
+        try:
+            target = Path(path).expanduser().resolve()
+        except Exception as e:
+            logger.exception("Invalid path provided to delete_path: %s", path, e)
+            raise e
+
+        if not target.exists():
+            logger.warning("Path does not exist, nothing to delete: %s", target.as_posix())
+            raise FileNotFoundError()
+
+        # If directory: traverse and delete all supported files under it
+        if target.is_dir():
+            for p in target.rglob("*"):
+                if p.is_file() and p.suffix.lower() in self.SUPPORTED_EXTS or p.is_dir():
+                    self.handle_delete_path(project_id, p)
+
+        # If file: remove corresponding nodes/embeddings/relationships
+        if target.is_file():
+            file_path_str = target.as_posix()
+            # Remove relationships before removing the node
+            try:
+                with project_entry.db_driver.session() as s:
+                    # Delete Chunk nodes contained by the Document, then the Document itself.
+                    s.run(
+                        """
+                        MATCH (d:Document {file_path: $path})
+                        OPTIONAL MATCH (d)-[:CONTAINS]->(c:Chunk)
+                        DETACH DELETE c, d
+                        """,
+                        {"path": file_path_str},
+                    )
+            except Exception as e:
+                logger.exception("Failed deleting document graph for %s", file_path_str)
+                raise e
+
+            # Then remove the node itself
+            try:
+                ingestion_entry.document_store.delete_documents([file_path_str])
+            except Exception as e:
+                logger.debug("Document store deletion attempt skipped/failed for %s", file_path_str)
+                raise e
+
+    def handle_list_documents(self) -> List[str]:
+        try:
+            return  [str(path) for path in self._iter_code_files()]
+        except Exception as e:
+            logger.exception("Failed listing documents", e)
+            raise e
+
+    def handle_refresh_documents(self, project_id: str) -> None:
+        logger.info("Refreshing all documents for project %s", project_id)
+        entry = self._project_entries.get(project_id)
+        if not entry:
+            raise ValueError(f"Project {project_id} not found")
+        for root in entry.project.source_roots:
+            rp = Path(root).expanduser().resolve()
+            if rp.exists():
+                self.handle_delete_path(project_id, rp)
+        for root in entry.project.source_roots:
+            rp = Path(root).expanduser().resolve()
+            if rp.exists():
+                self.handle_add_path(project_id, rp)
+
+    # ---------------------
+    # Project Methods
+    # ---------------------
+    def create_project(self, request_id, project):
+        pass
+
     # ---------------------
     # Helpers
     # ---------------------
@@ -295,7 +523,7 @@ class GraphRagManager:
                 yield p
 
     def _create_code_relationships(self):
-        with self._driver.session() as session:
+        with self._system_db_driver.session() as session:
             # Create IMPORTS relationships
             session.run("""
                 MATCH (d:Document)
