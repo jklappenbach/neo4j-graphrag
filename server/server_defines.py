@@ -88,6 +88,9 @@ class TaskManager(ABC):
     def add_task(self, param):
         pass
 
+    @abstractmethod
+    def list_active_tasks(self) -> List['Task']:
+        pass
 
 class Task(ABC):
     _request_id: str
@@ -247,19 +250,19 @@ class GraphRagManager(ABC):
     # Basic API
     # ---------------------
     @abstractmethod
-    def list_documents(self, request_id: str) -> List[str]:
+    def list_documents(self, request_id: str, project_id: str) -> List[str]:
         pass
 
     @abstractmethod
-    def refresh_documents(self, request_id: str) -> Dict[str, Any]:
+    def refresh_documents(self, request_id: str, project_id: str) -> Dict[str, Any]:
         pass
 
     @abstractmethod
-    def sync_project(self, project_id: str, force: bool = False) -> Dict[str, Any]:
+    def sync_project(self, project_id: str, force_all: bool = False) -> Dict[str, Any]:
         pass
 
     @abstractmethod
-    def query(self, request_id: str, project_id: str, query: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    def query(self, request_id: str, project_id: str, query_str: str, args: Dict[str, Any]) -> Dict[str, Any]:
         pass
 
     @abstractmethod
@@ -279,7 +282,7 @@ class GraphRagManager(ABC):
         pass
 
     @abstractmethod
-    def handle_list_documents(self, project_id: str) -> List[str]:
+    def handle_list_documents(self, project_id: str) -> Dict[str, Any]:
         pass
 
     @abstractmethod
@@ -289,6 +292,11 @@ class GraphRagManager(ABC):
     @abstractmethod
     def handle_query(self, request_id: str, project_id: str, query: str, args: Dict[str, Any]) -> Dict[str, Any]:
         pass
+
+    @abstractmethod
+    def set_websocket_notifier(self, websocket_notifier):
+        pass
+
 
 class ProjectManager(ABC):
     """Abstract interface for CRUD operations on Project instances backed by Neo4j."""

@@ -60,9 +60,9 @@ class FileTask(Task):
             if self._task_mgr:
                 self._task_mgr.fail_task(self._request_id, str(e))
 
-    def get_create_cypher(self) -> Tuple[LiteralString, dict[str, Any]]:
+    def get_create_cypher(self) -> Tuple[LiteralString, Dict[str, Any]]:
         """Create a FileEventStatus record in Neo4j."""
-        query = """
+        query: LiteralString = """
         CREATE (f:ProcessingStatus:FileTask {
             request_id: $request_id,
             project_id: $project_id,
@@ -81,7 +81,7 @@ class FileTask(Task):
         RETURN f.request_id as request_id
         """
 
-        parameters = {
+        parameters: Dict[str, Any] = {
             "request_id": self._request_id,
             "project_id": self._project_id,
             "task_type": self.get_task_type(),
@@ -99,7 +99,7 @@ class FileTask(Task):
 
         return query, parameters
 
-    def get_update_cypher(self) -> tuple[str, dict[str, Any]]:
+    def get_update_cypher(self) -> tuple[str, Dict[str, Any]]:
         query = """
         MATCH (f:ProcessingStatus:FileTask {request_id: $request_id})
         SET f.task_type = $task_type,
@@ -182,7 +182,7 @@ class QueryTask(Task):
         except Exception as e:
             self._task_mgr.fail_task(self._request_id, str(e))
 
-    def get_create_cypher(self) -> tuple[str, dict[str, str | float | None]]:
+    def get_create_cypher(self) -> tuple[str, Dict[str, str | float | None]]:
         query = """
         CREATE (q:ProcessingStatus:QueryTask {
             request_id: $request_id,
@@ -213,7 +213,7 @@ class QueryTask(Task):
         }
         return query, parameters
 
-    def get_update_cypher(self) -> tuple[str, dict[str, str | float | None]]:
+    def get_update_cypher(self) -> tuple[str, Dict[str, str | float | None]]:
         query = """
         MATCH (f:ProcessingStatus:QueryTask {request_id: $request_id})
         SET f.task_type = $task_type,
@@ -253,7 +253,7 @@ class QueryTask(Task):
 class RefreshTask(Task):
     def __init__(self, request_id: str,
                  project_id: str,
-                 handler: Callable[['RefreshTask'], bool],
+                 handler: Callable[[str], None],
                  task_mgr: TaskManager) -> None:
         super().__init__(request_id, project_id, task_mgr)
         self._handler = handler
@@ -392,7 +392,7 @@ class ListDocumentsTask(Task):
         RETURN q.request_id as request_id
         """
 
-        parameters = {
+        parameters: Dict[str, Any] = {
             "request_id": self._request_id,
             "project_id": self._project_id,
             "task_type": self.get_task_type(),
@@ -419,7 +419,7 @@ class ListDocumentsTask(Task):
         RETURN f.request_id as request_id
         """
 
-        parameters = {
+        parameters: Dict[str, Any] = {
             "request_id": self._request_id,
             "task_type": self.get_task_type(),
             "status": self._task_status.value,
@@ -431,7 +431,6 @@ class ListDocumentsTask(Task):
         }
 
         return query, parameters
-
 
 class TaskFactory:
     @staticmethod
@@ -455,7 +454,7 @@ class TaskFactory:
 class TaskManagerImpl(TaskManager):
 
     def __init__(self, driver: neo4j.Driver,
-                 websocket_notifier: Optional[Callable[[str, Dict[str, Any]], Awaitable[None]]] = None):
+                 websocket_notifier: Callable[[str, Dict[str, Any]], Awaitable[None]]):
 
         self._records: Dict[str, Task] = {}
         self._dao = TaskDAO(driver)

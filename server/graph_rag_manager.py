@@ -24,13 +24,14 @@ from server.code_aware_splitter import CodeAwareSplitter
 from server.code_relationship_extractor import CodeRelationshipExtractor
 from server.graph_document_expander import GraphAwareRetriever
 from server.project_manager import ProjectManagerImpl
-from server.server_defines import GraphRagManager, Project
-from server.task_manager import TaskManagerImpl, RefreshTask, QueryTask
+from server.server_defines import GraphRagManager, Project, TaskManager
+from server.task_manager import TaskManagerImpl, RefreshTask, QueryTask, ListDocumentsTask
 
 logging.getLogger("haystack").setLevel(logging.DEBUG)
 
 # Module logger
 logger = logging.getLogger(__name__)
+
 # Enable content tracing for component inputs/outputs
 tracing.tracer.is_content_tracing_enabled = True
 
@@ -104,16 +105,16 @@ class GraphRagManagerImpl(GraphRagManager):
     Graph-based RAG manager using Haystack with code-aware ingestion.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, db_driver: neo4j.Driver, task_mgr: TaskManager) -> None:
         self._neo4j_url = os.environ.get('NEO4J_URL', 'bolt://localhost:7687')
         self._username = os.environ.get('NEO4j_USERNAME', 'neo4j')
         self._password = os.environ.get('NEO4J_PASSWORD', 'your_neo4j_password')
         database = os.environ.get('NEO4J_DB_NAME', 'graph-rag')
 
-        self._system_db_driver = GraphDatabase.driver(self._neo4j_url, auth=(self._username, self._password))
-        self._task_mgr = TaskManagerImpl(self._system_db_driver)
-        self._project_mgr = ProjectManagerImpl(self._system_db_driver)
-        self._project_entries: dict[str, _ProjectEntry] = {}
+        self._db_driver = db_driver
+        self._task_mgr = task_mgr
+        self._project_mgr = ProjectManagerImpl(self._db_driver)
+        self._project_entries: Dict[str, _ProjectEntry] = {}
 
     # ---------------------
     # Hash utilities and metadata
@@ -156,6 +157,9 @@ class GraphRagManagerImpl(GraphRagManager):
                  content_hash=content_hash,
                  last_modified_at=int(stat.st_mtime * 1000),
                  file_size=stat.st_size)
+    def set_websocket_notifier(self, websocket_notifier) -> None:
+        self.websocket_notifier = websocket_notifier
+
 
 
     # ---------------------
@@ -267,8 +271,8 @@ class GraphRagManagerImpl(GraphRagManager):
                 for obs in entry.observers or []:
                     try:
                         obs.stop(); obs.join(timeout=1)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning(f"Failed to stop observer for project {project_id}: {e}")
                 entry.observers = []
                 # Sync after update
                 self.sync_project(project_id, force=False)
@@ -313,107 +317,106 @@ class GraphRagManagerImpl(GraphRagManager):
     # ---------------------
     # Query API
     # ---------------------
-        def query(self, project_id: str, request_id: str, query: str, args: Dict[str, Any]) -> Dict[str, Any]:
-            try:
-                self._task_mgr.add_task(
-                    QueryTask(project_id, request_id, query, args, self.handle_query, self._task_mgr))
-                return {"ok": True, "request_id": request_id}
-            except Exception as e:
-                logger.exception("Failed to query %s, request_id: %s", query, request_id)
-                return {"ok": False, "error": str(e)}
+    def query(self, request_id: str, project_id: str, query_str: str, args: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            self._task_mgr.add_task(
+                QueryTask(project_id, request_id, query_str, args, self.handle_query, self._task_mgr))
+            return {"ok": True, "request_id": request_id}
+        except Exception as e:
+            logger.exception("Failed to query %s, request_id: %s", query_str, request_id)
+            return {"ok": False, "error": str(e)}
 
-        def handle_query(self, project_id: str, request_id: str, query_str: str, args: Dict[str, Any]) -> Dict[
-            str, Any]:
-            """
-            Retrieve graph-aware relevant chunks from Neo4j via Haystack and answer with a local model.
-            The retrieval leverages relationships (IMPORTS, CALLS, DEFINES) using a Cypher-aware retriever.
-            """
-            logger.info("Entering GraphRagManager.handle_query request_id=%s query=%s", request_id, query_str)
-            project_entry = self._project_entries.get(project_id)
-            if not project_entry:
-                raise Exception('Invalid project ID provided.  Project does not exist.')
+    def handle_query(self, request_id: str, project_id: str, query_str: str, args: Dict[str, Any]) -> Dict[
+        str, Any]:
+        """
+        Retrieve graph-aware relevant chunks from Neo4j via Haystack and answer with a local model.
+        The retrieval leverages relationships (IMPORTS, CALLS, DEFINES) using a Cypher-aware retriever.
+        """
+        logger.info("Entering GraphRagManager.handle_query request_id=%s query=%s", request_id, query_str)
+        project_entry = self._project_entries.get(project_id)
+        if not project_entry:
+            raise Exception('Invalid project ID provided.  Project does not exist.')
 
-            try:
-                # Embed the query
-                q_embedder = OllamaTextEmbedder(
-                    model=project_entry.project.embedder_model_name,
-                    url="http://localhost:11434"
-                )
+        try:
+            # Embed the query
+            q_embedder = OllamaTextEmbedder(
+                model=project_entry.project.embedder_model_name,
+                url="http://localhost:11434"
+            )
 
-                # Use custom graph-aware retriever with the project-specific driver
-                retriever = GraphAwareRetriever(
-                    document_store=project_entry.document_store,
-                    driver=project_entry.db_driver,
-                    top_k=15,
-                    relationship_weight=0.3
-                )
+            # Use custom graph-aware retriever with the project-specific driver
+            retriever = GraphAwareRetriever(
+                document_store=project_entry.document_store,
+                driver=project_entry.db_driver,
+                top_k=15,
+                relationship_weight=0.3
+            )
 
-                # Local generator
-                generator = OllamaGenerator(model=project_entry.project.llm_model_name, url="http://localhost:11434")
+            # Local generator
+            generator = OllamaGenerator(model=project_entry.project.llm_model_name, url="http://localhost:11434")
 
-                # Build pipeline: embed -> retrieve
-                pipeline = Pipeline()
-                pipeline.add_component("q_embedder", q_embedder)
-                pipeline.add_component("retriever", retriever)
-                pipeline.connect("q_embedder.embedding", "retriever.query_embedding")
+            # Build pipeline: embed -> retrieve
+            pipeline = Pipeline()
+            pipeline.add_component("q_embedder", q_embedder)
+            pipeline.add_component("retriever", retriever)
+            pipeline.connect("q_embedder.embedding", "retriever.query_embedding")
 
-                # Correct v2-style run: feed data into the q_embedder
-                ret = pipeline.run(data={"q_embedder": {"text": query_str}})
+            # Correct v2-style run: feed data into the q_embedder
+            ret = pipeline.run(data={"q_embedder": {"text": query_str}})
 
-                # Safely extract documents
-                retr_out = ret.get("retriever") or {}
-                docs = retr_out.get("documents") or []
+            # Safely extract documents
+            retr_out = ret.get("retriever") or {}
+            docs = retr_out.get("documents") or []
 
-                if not docs:
-                    logger.info("No documents retrieved for request_id=%s", request_id)
-                    return {
-                        "ok": True,
-                        "request_id": request_id,
-                        "result": {
-                            "answer": "No relevant documents were found for your query.",
-                            "sources": [],
-                            "context": ""
-                        }
-                    }
-
-                context = "\n\n".join(getattr(d, "content", "") for d in docs if getattr(d, "content", ""))
-
-                prompt = f"""You are a code-aware assistant. Use the graph-related context to answer.
-    Context:
-    {context}
-
-    Question: {query_str}
-    Answer succinctly:"""
-
-                # Call generator directly instead of rerunning the whole pipeline
-                gen_res = generator.run(prompt=prompt)
-                # OllamaGenerator typically returns {"replies": [text, ...]}
-                replies = gen_res.get("replies") or []
-                answer = replies[0] if replies else ""
-
-                sources = []
-                for d in docs:
-                    fp = None
-                    # Try common places where file path may reside
-                    if hasattr(d, "meta") and isinstance(d.meta, dict):
-                        fp = d.meta.get("file_path") or d.meta.get("name") or d.meta.get("source")
-                    if not fp and hasattr(d, "id"):
-                        fp = str(d.id)
-                    if fp:
-                        sources.append(fp)
-
+            if not docs:
+                logger.info("No documents retrieved for request_id=%s", request_id)
                 return {
                     "ok": True,
                     "request_id": request_id,
                     "result": {
-                        "answer": answer,
-                        "sources": sources,
-                        "context": context
+                        "answer": "No relevant documents were found for your query.",
+                        "sources": [],
+                        "context": ""
                     }
                 }
-            except Exception as e:
-                logger.exception("Query operation failed request_id=%s: %s", request_id, str(e))
-                raise e
+
+            context = "\n\n".join(getattr(d, "content", "") for d in docs if getattr(d, "content", ""))
+
+            prompt = f"""You are a code-aware assistant. Use the graph-related context to answer.
+                Context: {context}
+
+                Question: {query_str}
+                Answer succinctly:"""
+
+            # Call generator directly instead of rerunning the whole pipeline
+            gen_res = generator.run(prompt=prompt)
+            # OllamaGenerator typically returns {"replies": [text, ...]}
+            replies = gen_res.get("replies") or []
+            answer = replies[0] if replies else ""
+
+            sources = []
+            for d in docs:
+                fp = None
+                # Try common places where file path may reside
+                if hasattr(d, "meta") and isinstance(d.meta, dict):
+                    fp = d.meta.get("file_path") or d.meta.get("name") or d.meta.get("source")
+                if not fp and hasattr(d, "id"):
+                    fp = str(d.id)
+                if fp:
+                    sources.append(fp)
+
+            return {
+                "ok": True,
+                "request_id": request_id,
+                "result": {
+                    "answer": answer,
+                    "sources": sources,
+                    "context": context
+                }
+            }
+        except Exception as e:
+            logger.exception("Query operation failed request_id=%s: %s", request_id, str(e))
+            raise e
 
     def cancel_query(self, request_id: str):
         try:
@@ -427,14 +430,15 @@ class GraphRagManagerImpl(GraphRagManager):
     # Documents API
     # ---------------------
 
-    def list_documents(self, request_id: str) -> List[str]:
+    def list_documents(self, request_id: str, project_id: str) -> Dict[str, Any]:
         logger.info("Entering GraphRagManager.list_documents, request_id=%s", request_id)
-        return [str(path) for path in self._iter_code_files()]
+        self._task_mgr.add_task(ListDocumentsTask(request_id, project_id, self.handle_list_documents(), self._task_mgr))
+        return {"ok": True, "request_id": request_id}
 
-    def refresh_documents(self, request_id: str) -> Dict[str, Any]:
+    def refresh_documents(self, request_id: str, project_id: str) -> Dict[str, Any]:
         logger.info("Entering GraphRagManager.clear_documents, request_id: %s", request_id)
         try:
-            self._task_mgr.add_task(RefreshTask(request_id, self.handle_refresh_documents()))
+            self._task_mgr.add_task(RefreshTask(request_id, self.handle_refresh_documents(), self._task_mgr))
             return {"ok": True, "request_id": request_id}
         except Exception as e:
             logger.exception("Failed to refresh documents, request_id: %s", request_id)
@@ -443,7 +447,6 @@ class GraphRagManagerImpl(GraphRagManager):
     def handle_add_path(self, project_id: str, path: Path) -> None:
         logger.info("Entering GraphRagManager.ingest_file file_path=%s", path)
         project_entry = self._project_entries.get(project_id)
-        ingestion_entry = self.get_ingestion_pipeline_for_project(project_entry.project)
 
         try:
             if not path.exists():
@@ -454,11 +457,11 @@ class GraphRagManagerImpl(GraphRagManager):
             else:
                 code_files.append(path)
 
-            if not code_files:
+            if len(code_files) == 0:
                 return
 
-            ingestion_entry.pipeline.run({"converter": {"sources": code_files}})
-            self._create_code_relationships()
+            project_entry.ingestion_pipeline.run({"converter": {"sources": code_files}})
+            self._create_doc_relationships()
             for fp in code_files:
                 ch = self._compute_file_hash(fp)
                 self._store_file_metadata(project_id, fp, ch)
@@ -483,7 +486,6 @@ class GraphRagManagerImpl(GraphRagManager):
         """
         logger.info("Entering GraphRagManager.delete_path path: %s", path)
         project_entry = self._project_entries.get(project_id)
-        ingestion_entry = self.get_ingestion_pipeline_for_project(project_entry.project)
 
         try:
             target = Path(path).expanduser().resolve()
@@ -522,14 +524,45 @@ class GraphRagManagerImpl(GraphRagManager):
 
             # Then remove the node itself
             try:
-                ingestion_entry.document_store.delete_documents([file_path_str])
+                project_entry.document_store.delete_documents([file_path_str])
             except Exception as e:
                 logger.debug("Document store deletion attempt skipped/failed for %s", file_path_str)
                 raise e
 
-    def handle_list_documents(self) -> List[str]:
+    def handle_list_documents(self, project_id: str) -> Dict[str, Any]:
         try:
-            return  [str(path) for path in self._iter_code_files()]
+            entry = self._project_entries.get(project_id)
+            if not entry:
+                raise ValueError(f"Project {project_id} not found")
+
+            # Gather filesystem files from all source roots using _iter_code_files as in sync_project
+            fs_files: List[str] = []
+            for root in entry.project.source_roots:
+                root_path = Path(root).expanduser().resolve()
+                if not root_path.exists():
+                    continue
+                for fp in self._iter_code_files(root_path):
+                    fs_files.append(fp.as_posix())
+
+            # Gather document store files (by file_path if available, else by id/name/source)
+            ds_files: List[str] = []
+            try:
+                with entry.db_driver.session(database=entry.project.name) as session:
+                    res = session.run("""
+                        MATCH (d:Document)
+                        RETURN coalesce(d.file_path, d.name, d.source, d.id) AS path
+                    """)
+                    for r in res:
+                        v = r.get("path")
+                        if v:
+                            ds_files.append(str(v))
+            except Exception as e:
+                logger.exception("Failed to fetch document store files for project %s, cause: %s", project_id, e)
+                raise e
+            return {
+                "fileSystem": fs_files,
+                "documentStore": ds_files
+            }
         except Exception as e:
             logger.exception("Failed listing documents", e)
             raise e
@@ -549,24 +582,15 @@ class GraphRagManagerImpl(GraphRagManager):
                 self.handle_add_path(project_id, rp)
 
     # ---------------------
-    # Project Methods
-    # ---------------------
-    def create_project(self, request_id, project):
-        pass
-
-    # ---------------------
     # Helpers
     # ---------------------
-    def _iter_code_files(self, root: Path = None) -> Iterable[Path]:
-        target = root
-        if target is None:
-            target = self._doc_root
-        for p in target.rglob("*"):
+    def _iter_code_files(self, root: Path) -> Iterable[Path]:
+        for p in root.rglob("*"):
             if p.is_file() and p.suffix.lower() in self.SUPPORTED_EXTS:
                 yield p
 
-    def _create_code_relationships(self):
-        with self._system_db_driver.session() as session:
+    def _create_doc_relationships(self):
+        with self._db_driver.session() as session:
             # Create IMPORTS relationships
             session.run("""
                 MATCH (d:Document)
@@ -586,3 +610,7 @@ class GraphRagManagerImpl(GraphRagManager):
                 WHERE d2.content CONTAINS 'def ' + called_function
                 MERGE (d)-[:CALLS]->(d2)
             """)
+
+    @property
+    def task_mgr(self):
+        return self._task_mgr

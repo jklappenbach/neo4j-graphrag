@@ -20,7 +20,7 @@ class ProjectManagerImpl(ProjectManager):
     - The per-project database is created/dropped with the project's name.
     """
 
-    CATALOG_DB = "projects_catalog"
+    CATALOG_DB = "graph-rag"
 
     def __init__(self, driver: Driver):
         self.driver = driver
@@ -34,15 +34,13 @@ class ProjectManagerImpl(ProjectManager):
             with self.driver.session(database="system") as sys_sess:
                 sys_sess.run(
                     "CREATE DATABASE $db IF NOT EXISTS",
-                    db=self.CATALOG_DB,
-                )
+                    db=self.CATALOG_DB)
 
             # Ensure unique constraint on Project.id
             with self.driver.session(database=self.CATALOG_DB) as cat_sess:
                 cat_sess.run(
                     "CREATE CONSTRAINT project_id_unique IF NOT EXISTS "
-                    "FOR (p:Project) REQUIRE p.id IS UNIQUE"
-                )
+                    "FOR (p:Project) REQUIRE p.id IS UNIQUE")
         except Exception as e:
             logger.exception("Failed to ensure catalog: %s", e)
             raise

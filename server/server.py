@@ -1,13 +1,19 @@
 import logging
+import os
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List
+from fastapi import Body, FastAPI, WebSocket
+
+import neo4j
 from fastapi import Body, FastAPI, WebSocket, HTTPException
+from neo4j import GraphDatabase
 
 from client.client_defines import ProjectCreate, ProjectUpdate, SyncRequest
 from server.graph_rag_manager import GraphRagManagerImpl
 from server.server_defines import Project
-from server.web_socket_manager import init_websocket_manager, websocket_endpoint
+from server.task_manager import TaskManagerImpl
+from server.web_socket_manager import WebSocketManager
 
 # Main logging configuration
 logging.basicConfig(
@@ -18,27 +24,30 @@ logging.basicConfig(
 # Module logger
 logger = logging.getLogger(__name__)
 
-# Initialize GraphRagManager
-graph_rag_manager = GraphRagManagerImpl()
+db_credentials: Dict[str, Any] = {
+    'neo4j_url': os.environ.get('NEO4J_URL', 'bolt://localhost:7687'),
+    'username': os.environ.get('NEO4j_USERNAME', 'neo4j'),
+    'password': os.environ.get('NEO4J_PASSWORD', 'your_neo4j_password'),
+    'database': os.environ.get('NEO4J_DB_NAME', 'graph-rag')
+}
 
-# Initialize WebSocket manager
-ws_manager = init_websocket_manager(graph_rag_manager)
+db_driver = GraphDatabase.driver(db_credentials.get('neo4j_url'),
+            auth=(db_credentials.get('username'), db_credentials.get('password')))
+
+task_manager = TaskManagerImpl(db_driver, WebSocketManager.websocket_notifier)
+graph_rag_manager = GraphRagManagerImpl(db_driver, task_manager)
 
 app = FastAPI(title="Graph RAG Server", version="0.1.0")
 
 @app.websocket("/ws/{connection_id}")
 async def websocket_route(websocket: WebSocket, connection_id: str):
-    """WebSocket endpoint for client connections.
-
-    Returns a JSON with status and current server time.
-    """
-    request_id = uuid.uuid4()
-    return {"status": "ok", "time": datetime.utcnow().isoformat() + "Z"}
+    """WebSocket endpoint for client connections."""
+    await WebSocketManager.websocket_endpoint(websocket, connection_id)
 
 @app.websocket("/ws")
 async def websocket_route_auto(websocket: WebSocket):
     """WebSocket endpoint with auto-generated connection ID."""
-    await websocket_endpoint(websocket)
+    await WebSocketManager.websocket_endpoint(websocket)
 
 @app.post("/query")
 async def create_query(project_id: str, query: str = Body(..., embed=True),
@@ -98,7 +107,7 @@ def sync_project(project_id: str, req: SyncRequest):
 @app.get("/api/tasks/scheduled", response_model=Dict[str, Any])
 def list_scheduled():
     try:
-        ops = graph_rag_manager._task_mgr.list_scheduled_operations()
+        ops = graph_rag_manager.task_mgr.list_active_tasks()
         return {"ok": True, "operations": ops}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
