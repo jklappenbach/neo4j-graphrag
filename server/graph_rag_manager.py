@@ -430,13 +430,13 @@ class GraphRagManagerImpl(GraphRagManager):
 
     def list_documents(self, request_id: str, project_id: str) -> Dict[str, Any]:
         logger.info("Entering GraphRagManager.list_documents, request_id=%s", request_id)
-        self._task_mgr.add_task(ListDocumentsTask(request_id, project_id, self.handle_list_documents(), self._task_mgr))
+        self._task_mgr.add_task(ListDocumentsTask(request_id, project_id, self.handle_list_documents, self._task_mgr))
         return {"ok": True, "request_id": request_id}
 
     def refresh_documents(self, request_id: str, project_id: str) -> Dict[str, Any]:
         logger.info("Entering GraphRagManager.clear_documents, request_id: %s", request_id)
         try:
-            self._task_mgr.add_task(RefreshTask(request_id, self.handle_refresh_documents(), self._task_mgr))
+            self._task_mgr.add_task(RefreshTask(request_id, project_id, self.handle_refresh_documents, self._task_mgr))
             return {"ok": True, "request_id": request_id}
         except Exception as e:
             logger.exception("Failed to refresh documents, request_id: %s", request_id)

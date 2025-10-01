@@ -85,12 +85,17 @@ class TaskManager(ABC):
         pass
 
     @abstractmethod
-    def add_task(self, param):
+    def add_task(self, task: 'Task'):
         pass
 
     @abstractmethod
     def list_active_tasks(self) -> List['Task']:
         pass
+
+    @abstractmethod
+    def cancel_task(self, request_id):
+        pass
+
 
 class Task(ABC):
     _request_id: str
