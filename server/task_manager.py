@@ -462,6 +462,25 @@ class TaskManagerImpl(TaskManager):
         self._lock = threading.RLock()
         self._websocket_notifier = websocket_notifier
 
+    def _notify(self, request_id: str, payload: Dict[str, Any]) -> None:
+        """
+        Schedule WebSocket notification safely regardless of sync/async context.
+        Ensures asyncio.create_task receives a Coroutine, not a bare Awaitable/Future.
+        """
+        if not self._websocket_notifier:
+            return
+
+        async def _run():
+            await self._websocket_notifier(request_id, payload)
+
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(_run())
+        except RuntimeError:
+            # No running loop (e.g., called from a worker thread) -> run in background loop
+            asyncio.run(_run())
+
+
     def add_task(self, task: Task) -> None:
         try:
             with self._lock:
@@ -470,13 +489,12 @@ class TaskManagerImpl(TaskManager):
                 query, parameters = task.get_create_cypher()
                 self._dao.create_task_record(query, parameters)
                 self._records[task.request_id] = task
-                if self._websocket_notifier:
-                    asyncio.create_task(self._websocket_notifier(task.request_id, {
+                self._notify(task.request_id, {
                         "type": "task_enqueued",
                         "task_type": task.get_task_type(),
                         "success": True,
                         "task_info": task.to_dict()
-                    }))
+                    })
         except Exception as e:
             logger.exception("Error adding task: %s", str(e))
             raise e
@@ -487,15 +505,12 @@ class TaskManagerImpl(TaskManager):
                 task.start_processing()
                 query, parameters = task.get_update_cypher()
                 self._dao.update_task_record(query, parameters)
-
-                # Send WebSocket notification
-                if self._websocket_notifier:
-                    asyncio.create_task(self._websocket_notifier(task.request_id, {
+                self._notify(task.request_id, {
                         "type": "task_started",
                         "task_type": task.get_task_type(),
                         "success": True,
                         "task_info": task.to_dict()
-                    }))
+                    })
         except Exception as e:
             logger.exception("Error starting task: %s", str(e))
             return False
@@ -506,16 +521,13 @@ class TaskManagerImpl(TaskManager):
                 task.complete_with_result(result)
                 query, parameters = task.get_update_cypher()
                 self._dao.update_task_record(query, parameters)
-
-                # Send WebSocket notification
-                if self._websocket_notifier:
-                    asyncio.create_task(self._websocket_notifier(task.request_id, {
+                self._notify(task.request_id, {
                         "type": "task_completed",
                         "task_type": task.get_task_type(),
                         "success": True,
                         "result": result,
                         "task_info": task.to_dict()
-                    }))
+                    })
         except Exception as e:
             logger.exception("Error completing task: %s", str(e))
             return False
@@ -526,16 +538,13 @@ class TaskManagerImpl(TaskManager):
                 task.fail_with_error(error)
                 query, properties = task.get_update_cypher()
                 self._dao.update_task_record(query, properties)
-
-                # Send WebSocket notification
-                if self._websocket_notifier:
-                    asyncio.create_task(self._websocket_notifier(task.request_id, {
+                self._notify(task.request_id, {
                         "type": "task_failed",
                         "task_type": task.get_task_type(),
                         "success": False,
                         "error": error,
                         "task_info": task.to_dict()
-                    }))
+                    })
         except Exception as e:
             logger.exception("Error failing task: %s", str(e))
             return False
@@ -548,15 +557,12 @@ class TaskManagerImpl(TaskManager):
                     task.cancel()
                     query, properties = task.get_update_cypher()
                     self._dao.update_task_record(query, properties)
-
-                    # Send WebSocket notification
-                    if self._websocket_notifier:
-                        asyncio.create_task(self._websocket_notifier(task.request_id, {
+                    self._notify(task.request_id, {
                             "type": "task_cancelled",
                             "task_type": task.get_task_type(),
                             "success": True,
                             "task_info": task.to_dict()
-                        }))
+                        })
                 return False
         except Exception as e:
             logger.exception("Error canceling task: %s", str(e))
