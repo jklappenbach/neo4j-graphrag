@@ -46,7 +46,7 @@ class _ChunkRecord:
 
 class _ProjectEntry:
     project: Project
-    observers: List[Observer]
+    observers: List[Observer] = []
     db_driver: neo4j.Driver
     document_store: Neo4jDocumentStore
     document_embedder: OllamaDocumentEmbedder
@@ -61,42 +61,44 @@ class _ProjectEntry:
         url = os.environ.get('NEO4J_URL', 'bolt://localhost:7687')
         username = os.environ.get('NEO4j_USERNAME', 'neo4j')
         password = os.environ.get('NEO4J_PASSWORD', 'your_neo4j_password')
+        try:
+            self.project = project
+            # Initialize Document Store and Embedder [1.2.7, 1.5.3]
+            self.document_store = Neo4jDocumentStore(
+                url=url,
+                username=username,
+                password=password,  # Replace with your password
+                database=self.project.name,
+                embedding_dim=768  # Ensure this matches your Ollama model's dimension
+            )
 
-        self.project = project
-        # Initialize Document Store and Embedder [1.2.7, 1.5.3]
-        self.document_store = Neo4jDocumentStore(
-            url=url,
-            username=username,
-            password=password,  # Replace with your password
-            database=self.project.name,
-            embedding_dim=768  # Ensure this matches your Ollama model's dimension
-        )
+            self.document_embedder = OllamaDocumentEmbedder(
+                model=self.project.embedder_model_name,
+                url="http://localhost:11434"
+            )
 
-        self.document_embedder = OllamaDocumentEmbedder(
-            model=self.project.embedder_model_name,
-            url="http://localhost:11434"
-        )
+            # Define the ingestion pipeline
+            self.text_converter = TextFileToDocument()
+            self.rel_extractor = CodeRelationshipExtractor()
+            self.doc_splitter = CodeAwareSplitter()
+            self.doc_writer = DocumentWriter(document_store=self.document_store,
+                                            policy=DuplicatePolicy.OVERWRITE)
 
-        # Define the ingestion pipeline
-        self.text_converter = TextFileToDocument()
-        self.rel_extractor = CodeRelationshipExtractor()
-        self.doc_splitter = CodeAwareSplitter()
-        self.doc_writer = DocumentWriter(document_store=self.document_store,
-                                        policy=DuplicatePolicy.OVERWRITE)
+            # Create the pipeline
+            self.ingestion_pipeline = Pipeline()
+            self.ingestion_pipeline.add_component("converter", self.text_converter)
+            self.ingestion_pipeline.add_component("splitter", self.doc_splitter)
+            self.ingestion_pipeline.add_component("extractor", self.rel_extractor)
+            self.ingestion_pipeline.add_component("embedder", self.document_embedder)
+            self.ingestion_pipeline.add_component("writer", self.doc_writer)
 
-        # Create the pipeline
-        self.ingestion_pipeline = Pipeline()
-        self.ingestion_pipeline.add_component("converter", self.text_converter)
-        self.ingestion_pipeline.add_component("splitter", self.doc_splitter)
-        self.ingestion_pipeline.add_component("extractor", self.rel_extractor)
-        self.ingestion_pipeline.add_component("embedder", self.document_embedder)
-        self.ingestion_pipeline.add_component("writer", self.doc_writer)
-
-        # Link the components
-        self.ingestion_pipeline.connect("converter.documents", "splitter.documents")
-        self.ingestion_pipeline.connect("splitter.documents", "extractor.documents")
-        self.ingestion_pipeline.connect("extractor.documents", "embedder.documents")
-        self.ingestion_pipeline.connect("embedder.documents", "writer.documents")
+            # Link the components
+            self.ingestion_pipeline.connect("converter.documents", "splitter.documents")
+            self.ingestion_pipeline.connect("splitter.documents", "extractor.documents")
+            self.ingestion_pipeline.connect("extractor.documents", "embedder.documents")
+            self.ingestion_pipeline.connect("embedder.documents", "writer.documents")
+        except Exception as e:
+            logger.exception("Error initializing project pipelines %s", str(e))
 
 class GraphRagManagerImpl(GraphRagManager):
     """
@@ -222,9 +224,9 @@ class GraphRagManagerImpl(GraphRagManager):
     # Projects API
     # ---------------------
     def create_project(self, project: Project) -> None:
+        if self._project_entries.get(project.project_id) is not None:
+            raise Exception('Project already exists')
         try:
-            if self._project_entries.get(project.project_id) is not None:
-                raise Exception('Project already exists')
             project_entry = _ProjectEntry(project)
             self._project_entries[project.project_id] = project_entry
             project_entry.db_driver = GraphDatabase.driver(self._neo4j_url, auth=(self._username, self._password))
@@ -528,11 +530,10 @@ class GraphRagManagerImpl(GraphRagManager):
                 raise e
 
     def handle_list_documents(self, project_id: str) -> Dict[str, Any]:
+        entry = self._project_entries.get(project_id)
+        if not entry:
+            raise ValueError(f"Project {project_id} not found")
         try:
-            entry = self._project_entries.get(project_id)
-            if not entry:
-                raise ValueError(f"Project {project_id} not found")
-
             # Gather filesystem files from all source roots using _iter_code_files as in sync_project
             fs_files: List[str] = []
             for root in entry.project.source_roots:

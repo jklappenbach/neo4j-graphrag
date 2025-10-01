@@ -29,7 +29,7 @@ class FileEventType(Enum):
 
 class Project:
     """A project represents a collection of source roots, which are recursively scanned for documents."""
-    def __init__(self, name: str, source_roots: List[str], args: Dict[str, Any]):
+    def __init__(self, name: str, source_roots: List[str], args: Dict[str, Any] = {}):
         self._project_id = str(uuid.uuid4())
         self._name = name
         self._source_roots = source_roots
@@ -53,6 +53,12 @@ class Project:
     def name(self) -> str:
         return self._name
 
+    @name.setter
+    def name(self, value: str) -> None:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("Project name must be a non-empty string")
+        self._name = value.strip()
+
     @property
     def project_id(self) -> str:
         return self._project_id
@@ -60,6 +66,12 @@ class Project:
     @property
     def source_roots(self) -> List[str]:
         return self._source_roots
+
+    @source_roots.setter
+    def source_roots(self, value: List[str]) -> None:
+        if not isinstance(value, List):
+            raise ValueError("Project source_roots must be a List[str]")
+        self._source_roots = value
 
     @property
     def embedder_model_name(self):
@@ -346,9 +358,7 @@ class ProjectManager(ABC):
     def update_project(
         self,
         project_id: str,
-        name: Optional[str] = None,
-        source_roots: Optional[List[str]] = None,
-        args: Optional[Dict[str, str]] = None,
+        args: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Update fields of a project."""
         raise NotImplementedError

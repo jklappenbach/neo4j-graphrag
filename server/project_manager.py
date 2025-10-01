@@ -63,22 +63,18 @@ class ProjectManagerImpl(ProjectManager):
                     CREATE (p:Project {
                         project_id: $project_id,
                         name: $name,
-                        source_roots: $source_roots,
-                        args: $args
+                        source_roots: $source_roots
                     })
                     """,
                     project_id=project_id,
                     name=project.name,
-                    source_roots=list(project.source_roots or []),
-                    args=dict(project.args or {}),
+                    source_roots=list(project.source_roots or [])
                 )
 
             return {
                 "project_id": project_id,
                 "name": project.name,
-                "source_roots": project.source_roots,
-                "args": project.args,
-                "database": project.name,
+                "source_roots": project.source_roots
             }
         except Exception as e:
             logger.exception("Error in create_project: %s", e)
@@ -116,9 +112,8 @@ class ProjectManagerImpl(ProjectManager):
                     items.append(Project.from_dict({
                             "project_id": p["project_id"],
                             "name": p["name"],
-                            "source_roots": list(p.get("source_roots", [])),
-                            "args": dict(p.get("args", {})),
-                            "database": p["name"] }))
+                            "source_roots": list(p.get("source_roots", []))
+                    }))
                 return items
         except Exception as e:
             logger.exception("Error in list_projects: %s", e)
@@ -127,27 +122,21 @@ class ProjectManagerImpl(ProjectManager):
     def update_project(
         self,
         project_id: str,
-        name: Optional[str] = None,
-        source_roots: Optional[List[str]] = None,
-        args: Optional[Dict[str, str]] = None,
+        args: Dict[str, Any] = None
     ) -> Dict[str, Any]:
         logger.info("update_project called: id=%s", project_id)
+
+        current = self.get_project(project_id)
+        if current is None:
+            raise ValueError(f"Project not found: {project_id}")
+
+        updates = {}
+
+        if args is not None:
+            updates = updates | args
         try:
-            # Fetch current
-            current = self.get_project(project_id)
-            if current is None:
-                raise ValueError(f"Project not found: {project_id}")
-
-            updates = {}
-            if name is not None:
-                updates["name"] = name
-            if source_roots is not None:
-                updates["source_roots"] = list(source_roots)
-            if args is not None:
-                updates["args"] = dict(args)
-
             if not updates:
-                return current
+                return current.to_dict()
 
             # If name changes, we need to rename database: create new DB and drop old
             old_name = current["name"]
@@ -181,8 +170,9 @@ class ProjectManagerImpl(ProjectManager):
                     "project_id": p["project_id"],
                     "name": p["name"],
                     "source_roots": list(p.get("source_roots", [])),
-                    "args": dict(p.get("args", {})),
-                    "database": p["name"],
+                    "embedder_model_name": p["embedder_model_name"],
+                    "llm_model_name": p["llm_model_name"],
+                    "query_temperature": p["query_temperature"]
                 }
         except Exception as e:
             logger.exception("Error in update_project: %s", e)

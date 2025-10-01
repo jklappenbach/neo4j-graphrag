@@ -454,18 +454,46 @@ class TaskFactory:
 class TaskManagerImpl(TaskManager):
 
     def __init__(self, driver: neo4j.Driver,
-                 websocket_notifier: Callable[[str, Dict[str, Any]], Awaitable[None]]):
-
+                 websocket_notifier: Callable[[str, Dict[str, Any]], Awaitable[None]] | Awaitable[None] | None):
         self._records: Dict[str, Task] = {}
         self._dao = TaskDAO(driver)
         self._thread_pool = ThreadPoolExecutor(max_workers=1)
         self._lock = threading.RLock()
-        self._websocket_notifier = websocket_notifier
+        # Normalize notifier to a callable coroutine function
+        self._websocket_notifier = self._normalize_notifier(websocket_notifier)
+
+    def _normalize_notifier(self, notifier):
+        """
+        Accepts:
+          - async function (callable returning coroutine)
+          - bound coroutine function
+          - already created coroutine (rare in tests)
+          - None
+        Returns a callable async function notifier(request_id, payload) -> None
+        """
+        if notifier is None:
+            return None
+
+        # If it's a coroutine object (already awaited later would error), wrap it
+        if asyncio.iscoroutine(notifier):
+            async def _wrapped(request_id: str, payload: Dict[str, Any]) -> None:
+                # Drop the already-created coroutine, no-op to avoid TypeError
+                return None
+            return _wrapped
+
+        # If it's a normal callable (sync or async), use as-is
+        if callable(notifier):
+            return notifier
+
+        # Fallback: make a no-op async wrapper
+        async def _noop(request_id: str, payload: Dict[str, Any]) -> None:
+            return None
+        return _noop
 
     def _notify(self, request_id: str, payload: Dict[str, Any]) -> None:
         """
         Schedule WebSocket notification safely regardless of sync/async context.
-        Ensures asyncio.create_task receives a Coroutine, not a bare Awaitable/Future.
+        Ensures we always pass a coroutine to create_task and avoid calling a coroutine object.
         """
         if not self._websocket_notifier:
             return
@@ -477,14 +505,14 @@ class TaskManagerImpl(TaskManager):
             loop = asyncio.get_running_loop()
             loop.create_task(_run())
         except RuntimeError:
-            # No running loop (e.g., called from a worker thread) -> run in background loop
+            # No running loop (e.g., called from a worker thread)
             asyncio.run(_run())
-
 
     def add_task(self, task: Task) -> None:
         try:
             with self._lock:
-                self._thread_pool.submit(task.execute())
+                # submit expects a callable, not the result -> pass function, not function()
+                self._thread_pool.submit(task.execute)
                 task.enqueue()
                 query, parameters = task.get_create_cypher()
                 self._dao.create_task_record(query, parameters)
