@@ -1,4 +1,5 @@
 import json
+import logging
 import time
 import uuid
 from abc import ABC, abstractmethod
@@ -7,9 +8,8 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple, LiteralString, List
-import logging
+
 from neo4j import Record
-from watchdog.events import FileSystemEvent
 
 logger = logging.getLogger(__name__)
 
@@ -258,6 +258,26 @@ class GraphRagManager(ABC):
         pass
 
     @abstractmethod
+    def create_project(self, project: Project) -> None:
+        pass
+
+    @abstractmethod
+    def list_projects(self):
+        pass
+
+    @abstractmethod
+    def get_project(self, project_id):
+        pass
+
+    @abstractmethod
+    def update_project(self, project_id, name, source_roots, args):
+        pass
+
+    @abstractmethod
+    def delete_project(self, project_id):
+        pass
+
+    @abstractmethod
     def sync_project(self, project_id: str, force_all: bool = False) -> Dict[str, Any]:
         pass
 
@@ -296,6 +316,7 @@ class GraphRagManager(ABC):
     @abstractmethod
     def set_websocket_notifier(self, websocket_notifier):
         pass
+
 
 
 class ProjectManager(ABC):

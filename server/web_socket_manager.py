@@ -1,7 +1,7 @@
 import json
 import logging
 import uuid
-from typing import Any, Dict, Optional, Awaitable
+from typing import Any, Dict
 
 from fastapi import WebSocket
 from starlette.websockets import WebSocketDisconnect

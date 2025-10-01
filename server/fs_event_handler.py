@@ -4,7 +4,7 @@ from pathlib import Path
 
 from watchdog.events import FileSystemEventHandler, FileSystemEvent
 
-from server.server_defines import Project, TaskManager, GraphRagManager
+from server.server_defines import TaskManager, GraphRagManager
 from server.task_manager import FileTask
 
 logger = logging.getLogger(__name__)

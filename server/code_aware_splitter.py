@@ -2,6 +2,7 @@ import ast
 import logging
 import re
 from typing import Dict, Any, List, Tuple
+
 from haystack import component
 
 logger = logging.getLogger(__name__)

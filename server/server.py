@@ -1,9 +1,8 @@
 import logging
 import os
 import uuid
-from datetime import datetime
+from contextlib import asynccontextmanager
 from typing import Any, Dict, List
-from fastapi import Body, FastAPI, WebSocket
 
 import neo4j
 from fastapi import Body, FastAPI, WebSocket, HTTPException
@@ -11,7 +10,7 @@ from neo4j import GraphDatabase
 
 from client.client_defines import ProjectCreate, ProjectUpdate, SyncRequest
 from server.graph_rag_manager import GraphRagManagerImpl
-from server.server_defines import Project
+from server.server_defines import Project, TaskManager, GraphRagManager
 from server.task_manager import TaskManagerImpl
 from server.web_socket_manager import WebSocketManager
 
@@ -31,13 +30,50 @@ db_credentials: Dict[str, Any] = {
     'database': os.environ.get('NEO4J_DB_NAME', 'graph-rag')
 }
 
-db_driver = GraphDatabase.driver(db_credentials.get('neo4j_url'),
-            auth=(db_credentials.get('username'), db_credentials.get('password')))
-
-task_manager = TaskManagerImpl(db_driver, WebSocketManager.websocket_notifier)
-graph_rag_manager = GraphRagManagerImpl(db_driver, task_manager)
+db_driver: neo4j.Driver
+task_manager: TaskManager
+graph_rag_manager: GraphRagManager
 
 app = FastAPI(title="Graph RAG Server", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global db_driver, task_manager, graph_rag_manager
+    # Startup
+    logger.info("Starting up FastAPI application")
+    uri = db_credentials.get('neo4j_url')
+    user = db_credentials.get('username')
+    pwd = db_credentials.get('password')
+
+    db_driver = GraphDatabase.driver(uri, auth=(user, pwd))
+    try:
+        with db_driver.session(database=db_credentials.get('database')) as session:
+            session.run("RETURN 1")
+        logger.info("Connected to Neo4j at %s", uri)
+    except Exception as e:
+        logger.exception("Failed to connect to Neo4j: %s", e)
+        # Ensure driver is closed on failure
+        try:
+            db_driver.close()
+        except Exception:
+            pass
+        raise
+
+    # Initialize managers
+    task_manager = TaskManagerImpl(db_driver, WebSocketManager.websocket_notifier)
+    graph_rag_manager = GraphRagManagerImpl(db_driver, task_manager)
+    logger.info("Managers initialized")
+
+    yield
+
+    # Shutdown
+    logger.info("Shutting down FastAPI application")
+    try:
+        if db_driver:
+            db_driver.close()
+            logger.info("Neo4j driver closed")
+    except Exception as e:
+        logger.exception("Error closing Neo4j driver: %s", e)
 
 @app.websocket("/ws/{connection_id}")
 async def websocket_route(websocket: WebSocket, connection_id: str):
@@ -99,7 +135,7 @@ def delete_project(project_id: str):
 @app.post("/api/projects/{project_id}/sync", response_model=Dict[str, Any])
 def sync_project(project_id: str, req: SyncRequest):
     try:
-        res = graph_rag_manager.sync_project(project_id, force=req.force)
+        res = graph_rag_manager.sync_project(project_id, force_all=req.force)
         return {"ok": True, "project_id": project_id, "sync": res}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -107,7 +143,7 @@ def sync_project(project_id: str, req: SyncRequest):
 @app.get("/api/tasks/scheduled", response_model=Dict[str, Any])
 def list_scheduled():
     try:
-        ops = graph_rag_manager.task_mgr.list_active_tasks()
+        ops = task_manager.list_active_tasks()
         return {"ok": True, "operations": ops}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

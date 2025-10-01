@@ -1,17 +1,15 @@
 import hashlib
 import logging
 import os
-import uuid
 from dataclasses import dataclass
-from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
 import neo4j
-from haystack.core.pipeline import Pipeline
 from haystack import tracing
 from haystack.components.converters import TextFileToDocument
 from haystack.components.writers import DocumentWriter
+from haystack.core.pipeline import Pipeline
 from haystack.document_stores.types import DuplicatePolicy
 from haystack.tracing.logging_tracer import LoggingTracer
 from haystack_integrations.components.embedders.ollama import OllamaDocumentEmbedder, OllamaTextEmbedder
@@ -25,7 +23,7 @@ from server.code_relationship_extractor import CodeRelationshipExtractor
 from server.graph_document_expander import GraphAwareRetriever
 from server.project_manager import ProjectManagerImpl
 from server.server_defines import GraphRagManager, Project, TaskManager
-from server.task_manager import TaskManagerImpl, RefreshTask, QueryTask, ListDocumentsTask
+from server.task_manager import RefreshTask, QueryTask, ListDocumentsTask
 
 logging.getLogger("haystack").setLevel(logging.DEBUG)
 

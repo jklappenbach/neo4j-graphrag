@@ -1,7 +1,8 @@
-from typing import Any, Dict, Iterable, List, Optional, Tuple
-from haystack import component, Document
 import ast
 import logging
+from typing import List
+
+from haystack import component, Document
 
 logger = logging.getLogger(__name__)
 
