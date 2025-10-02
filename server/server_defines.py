@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional, Tuple, LiteralString, List
 
 from neo4j import Record
+from websocket import WebSocket
 
 logger = logging.getLogger(__name__)
 
@@ -367,3 +368,33 @@ class ProjectManager(ABC):
     def delete_project(self, project_id: str) -> Dict[str, Any]:
         """Delete a project and drop its Neo4j database."""
         raise NotImplementedError
+
+class WebSocketManager(ABC):
+    """Manages WebSocket connections and routing of TaskManager notifications to clients."""
+    _task_mgr: TaskManager
+
+    @abstractmethod
+    def set_task_manager(self, task_mgr: TaskManager) -> None:
+        pass
+
+    @abstractmethod
+    async def connect(self, websocket: WebSocket, connection_id: str):
+        pass
+
+    @abstractmethod
+    def disconnect(self, connection_id: str):
+        pass
+
+    @abstractmethod
+    def register_request(self, request_id: str, connection_id: str):
+        pass
+
+    @abstractmethod
+    async def send_message(self, connection_id: str, message: Dict[str, Any]) -> bool:
+        pass
+
+    @abstractmethod
+    async def send_response(self, request_id: str, message: Dict[str, Any]) -> bool:
+        pass
+
+

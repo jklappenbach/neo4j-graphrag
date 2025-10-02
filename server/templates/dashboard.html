@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Graph RAG Dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  body { font-family: Arial, sans-serif; margin: 0; padding: 0; color: #111; background: #fafafa; }
+  header { background: #0b7285; color: white; padding: 12px 16px; }
+  h1 { margin: 0; font-size: 18px; }
+  .tabs { display: flex; gap: 4px; background: #e7f5ff; padding: 8px; border-bottom: 1px solid #ddd; overflow-x: auto; }
+  .tab { padding: 8px 12px; background: #d0ebff; border: 1px solid #99d9f2; border-bottom: none; cursor: pointer; border-radius: 6px 6px 0 0; white-space: nowrap; }
+  .tab.active { background: white; border-bottom: 1px solid white; }
+  .panel { padding: 16px; background: white; border: 1px solid #ddd; border-top: none; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(260px,1fr)); gap: 16px; }
+  .card { border: 1px solid #ddd; border-radius: 8px; background: #fff; padding: 12px; }
+  .card h3 { margin: 0 0 8px 0; font-size: 15px; color: #0b7285; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { padding: 6px 8px; border-bottom: 1px solid #eee; text-align: left; font-size: 14px; }
+  input[type=text] { width: 100%; padding: 6px 8px; border: 1px solid #ccc; border-radius: 4px; }
+  button { background: #0b7285; color: white; border: none; padding: 6px 10px; border-radius: 4px; cursor: pointer; }
+  button.secondary { background: #adb5bd; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .listbox { width: 100%; height: 140px; }
+  .pill { display: inline-block; background: #e9ecef; color: #343a40; padding: 2px 8px; margin: 2px; border-radius: 999px; font-size: 12px; }
+  .muted { color: #666; font-size: 12px; }
+</style>
+</head>
+<body>
+<header><h1>Graph RAG Dashboard</h1></header>
+
+<div class="tabs" id="tabs">
+  <div class="tab active" data-tab="main">Main</div>
+  <div class="tab" data-tab="system">System</div>
+</div>
+
+<div class="panel" id="panel-main" style="display:block">
+  <div class="grid">
+    <div class="card">
+      <h3>Create Project</h3>
+      <div class="row">
+        <input type="text" id="newProjectName" placeholder="Project name" />
+      </div>
+      <div class="row">
+        <input type="text" id="newProjectSources" placeholder="Source roots (comma-separated paths)" />
+      </div>
+      <div class="row">
+        <button id="createProjectBtn">Create</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Projects</h3>
+      <div id="projectsList" class="muted">Loading...</div>
+    </div>
+
+    <div class="card">
+      <h3>Server Health</h3>
+      <div id="serverHealth" class="muted">Loading...</div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:16px">
+    <h3>Active Tasks</h3>
+    <table id="activeTasksTable">
+      <thead><tr><th>Request ID</th><th>Project</th><th>Type</th><th>Status</th><th>Updated</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <div class="card" style="margin-top:16px">
+    <h3>Recent Tasks</h3>
+    <table id="recentTasksTable">
+      <thead><tr><th>Request ID</th><th>Project</th><th>Type</th><th>Status</th><th>Completed</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</div>
+
+<div class="panel" id="panel-system" style="display:none">
+  <div class="grid">
+    <div class="card">
+      <h3>Server Status</h3>
+      <div id="systemStatus" class="muted">Loading...</div>
+    </div>
+    <div class="card">
+      <h3>Tracked Projects</h3>
+      <div id="systemProjects" class="muted">Loading...</div>
+    </div>
+  </div>
+</div>
+
+<div id="projectPanels"></div>
+
+<script>
+(() => {
+  const tabsEl = document.getElementById('tabs');
+  const mainPanel = document.getElementById('panel-main');
+  const systemPanel = document.getElementById('panel-system');
+  const projectPanels = document.getElementById('projectPanels');
+
+  let projects = [];
+  let ws;
+  let activeTasks = new Map();
+  let recentTasks = [];
+  let startedAt = Date.now();
+  let dbConnected = false;
+
+  function switchTab(tabId) {
+    Array.from(tabsEl.children).forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.panel').forEach(p => p.style.display = 'none');
+    const tab = Array.from(tabsEl.children).find(t => t.dataset.tab === tabId);
+    if (tab) tab.classList.add('active');
+    const panel = document.getElementById('panel-' + tabId);
+    if (panel) panel.style.display = 'block';
+  }
+
+  tabsEl.addEventListener('click', (e) => {
+    const t = e.target.closest('.tab');
+    if (!t) return;
+    switchTab(t.dataset.tab);
+  });
+
+  function htmlEscape(s){
+    return ('' + s).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+  }
+
+  async function refreshHealth() {
+    try {
+      const projRes = await fetch('/api/projects');
+      const projData = await projRes.json();
+      projects = Array.isArray(projData) ? projData : [];
+      renderProjects();
+      renderSystemProjects();
+
+      dbConnected = true;
+      const upSeconds = Math.floor((Date.now() - startedAt)/1000);
+      const mem = navigator.deviceMemory ? (navigator.deviceMemory + ' GB (approx)') : 'N/A';
+      const healthEl = document.getElementById('serverHealth');
+      healthEl.innerHTML = `
+        <div>DB Connected: <b>${dbConnected ? 'Yes' : 'No'}</b></div>
+        <div>Uptime: <b>${upSeconds}s</b></div>
+        <div>Client Memory (approx): <b>${mem}</b></div>
+        <div>Load: <span class="muted">Client-side approximation only</span></div>
+      `;
+
+      const sysEl = document.getElementById('systemStatus');
+      sysEl.innerHTML = `
+        <div>DB Connected: <b>${dbConnected ? 'Yes' : 'No'}</b></div>
+        <div>Uptime: <b>${upSeconds}s</b></div>
+        <div>Client Memory (approx): <b>${mem}</b></div>
+        <div>Load: <span class="muted">Client-side approximation only</span></div>
+      `;
+
+      renderProjectTabsAndPanels();
+      projects.forEach(loadProjectDocuments);
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
+  function renderProjects() {
+    const listEl = document.getElementById('projectsList');
+    if (!projects.length) {
+      listEl.textContent = 'No projects found.';
+      return;
+    }
+    const pills = projects.map(p => `<span class="pill">${htmlEscape(p.name)}</span>`).join(' ');
+    listEl.innerHTML = `
+      <div>Total: ${projects.length}</div>
+      <div>${pills}</div>
+    `;
+  }
+
+  function renderSystemProjects() {
+    const el = document.getElementById('systemProjects');
+    if (!projects.length) {
+      el.textContent = 'No projects tracked.';
+      return;
+    }
+    const names = projects.map(p => htmlEscape(p.name)).join(', ');
+    el.innerHTML = `
+      <div>Count: <b>${projects.length}</b></div>
+      <div>Names: ${names}</div>
+    `;
+  }
+
+  function ensureProjectTab(project) {
+    const tabId = 'proj-' + project.project_id;
+    if (!Array.from(tabsEl.children).some(t => t.dataset.tab === tabId)) {
+      const tab = document.createElement('div');
+      tab.className = 'tab';
+      tab.dataset.tab = tabId;
+      tab.textContent = project.name;
+      tabsEl.appendChild(tab);
+    }
+    const panelId = 'panel-' + tabId;
+    if (!document.getElementById(panelId)) {
+      const panel = document.createElement('div');
+      panel.className = 'panel';
+      panel.id = panelId;
+      panel.style.display = 'none';
+      panel.innerHTML = `
+        <div class="grid">
+          <div class="card">
+            <h3>Source Roots</h3>
+            <select class="listbox" id="roots-${project.project_id}" size="6"></select>
+            <div class="row" style="margin-top:8px">
+              <input type="text" id="newRoot-${project.project_id}" placeholder="Add new source root..." />
+              <button onclick="window.__addRoot('${project.project_id}')">Add</button>
+              <button class="secondary" onclick="window.__removeSelectedRoot('${project.project_id}')">Remove Selected</button>
+            </div>
+          </div>
+          <div class="card">
+            <h3>Documents</h3>
+            <table id="docs-${project.project_id}">
+              <thead><tr><th>Path</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="row" style="margin-top:12px">
+          <button class="secondary" onclick="window.__deleteProject('${project.project_id}')">Delete Project</button>
+        </div>
+      `;
+      projectPanels.appendChild(panel);
+    }
+    const rootsSel = document.getElementById('roots-' + project.project_id);
+    rootsSel.innerHTML = '';
+    (project.source_roots || []).forEach(r => {
+      const opt = document.createElement('option');
+      opt.textContent = r;
+      opt.value = r;
+      rootsSel.appendChild(opt);
+    });
+  }
+
+  function renderProjectTabsAndPanels() {
+    projects.forEach(ensureProjectTab);
+  }
+
+  async function loadProjectDocuments(project) {
+    try {
+      const tbody = document.querySelector('#docs-' + project.project_id + ' tbody');
+      if (tbody) tbody.innerHTML = '';
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
+  function renderActiveTasks() {
+    const tbody = document.querySelector('#activeTasksTable tbody');
+    tbody.innerHTML = '';
+    Array.from(activeTasks.values()).forEach(row => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${htmlEscape(row.request_id)}</td>
+        <td>${htmlEscape(row.project_id || '')}</td>
+        <td>${htmlEscape(row.task_type || '')}</td>
+        <td>${htmlEscape(row.status || '')}</td>
+        <td>${new Date().toLocaleTimeString()}</td>
+      `;
+      tbody.appendChild(tr);
+    });
+  }
+
+  function renderRecentTasks() {
+    const tbody = document.querySelector('#recentTasksTable tbody');
+    tbody.innerHTML = '';
+    recentTasks.slice(-50).reverse().forEach(row => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${htmlEscape(row.request_id)}</td>
+        <td>${htmlEscape(row.project_id || '')}</td>
+        <td>${htmlEscape(row.task_type || '')}</td>
+        <td>${htmlEscape(row.status || '')}</td>
+        <td>${new Date().toLocaleTimeString()}</td>
+      `;
+      tbody.appendChild(tr);
+    });
+  }
+
+  async function createProject() {
+    const name = document.getElementById('newProjectName').value.trim();
+    const sources = document.getElementById('newProjectSources').value
+      .split(',')
+      .map(s => s.trim())
+      .filter(Boolean);
+    if (!name) return;
+    const res = await fetch('/api/projects', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, source_roots: sources, args: {} })
+    });
+    if (res.ok) {
+      await refreshHealth();
+      document.getElementById('newProjectName').value = '';
+      document.getElementById('newProjectSources').value = '';
+    }
+  }
+
+  async function deleteProject(project_id) {
+    const res = await fetch('/api/projects/' + encodeURIComponent(project_id), { method: 'DELETE' });
+    if (res.ok) {
+      const tab = Array.from(tabsEl.children).find(t => t.dataset.tab === ('proj-' + project_id));
+      if (tab) tabsEl.removeChild(tab);
+      const panel = document.getElementById('panel-proj-' + project_id);
+      if (panel) panel.remove();
+      await refreshHealth();
+      switchTab('main');
+    }
+  }
+
+  async function addRoot(project_id) {
+    const inp = document.getElementById('newRoot-' + project_id);
+    const val = (inp.value || '').trim();
+    if (!val) return;
+    const proj = projects.find(p => p.project_id === project_id);
+    if (!proj) return;
+    const roots = Array.from(new Set([...(proj.source_roots || []), val]));
+    const res = await fetch('/api/projects/' + encodeURIComponent(project_id), {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source_roots: roots })
+    });
+    if (res.ok) {
+      inp.value = '';
+      await refreshHealth();
+    }
+  }
+
+  async function removeSelectedRoot(project_id) {
+    const sel = document.getElementById('roots-' + project_id);
+    const toRemove = Array.from(sel.selectedOptions).map(o => o.value);
+    const proj = projects.find(p => p.project_id === project_id);
+    if (!proj) return;
+    const roots = (proj.source_roots || []).filter(r => !toRemove.includes(r));
+    const res = await fetch('/api/projects/' + encodeURIComponent(project_id), {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source_roots: roots })
+    });
+    if (res.ok) {
+      await refreshHealth();
+    }
+  }
+
+  window.__addRoot = addRoot;
+  window.__removeSelectedRoot = removeSelectedRoot;
+  window.__deleteProject = deleteProject;
+
+  document.getElementById('createProjectBtn').addEventListener('click', createProject);
+
+  function connectWS() {
+    const id = (crypto && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now());
+    ws = new WebSocket(`ws://${location.host}/ws`);
+    ws.onopen = () => console.log('WS connected');
+    ws.onmessage = (evt) => {
+      try {
+        const msg = JSON.parse(evt.data);
+        const t = msg.type;
+        if (!t) return;
+        const reqId = msg.request_id || msg.requestId || 'n/a';
+        const row = {
+          request_id: reqId,
+          project_id: msg.project_id || '',
+          task_type: msg.task_type || '',
+          status: t
+        };
+        if (t === 'task_enqueued' || t === 'task_started') {
+          activeTasks.set(reqId, row);
+        } else if (t === 'task_completed' || t === 'task_failed' || t === 'task_cancelled') {
+          activeTasks.delete(reqId);
+          recentTasks.push(row);
+        }
+        renderActiveTasks();
+        renderRecentTasks();
+      } catch (e) {
+        console.warn('WS message parse error', e);
+      }
+    };
+    ws.onclose = () => {
+      console.log('WS closed, retrying in 2s');
+      setTimeout(connectWS, 2000);
+    };
+  }
+
+  refreshHealth();
+  connectWS();
+  setInterval(refreshHealth, 10000);
+})();
+</script>
+</body>
+</html>

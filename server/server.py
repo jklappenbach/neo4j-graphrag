@@ -6,13 +6,16 @@ from typing import Any, Dict, List
 
 import neo4j
 from fastapi import Body, FastAPI, WebSocket, HTTPException
+from fastapi.responses import HTMLResponse
+from fastapi import Request
+from pathlib import Path
 from neo4j import GraphDatabase
 
 from client.client_defines import ProjectCreate, ProjectUpdate, SyncRequest
 from server.graph_rag_manager import GraphRagManagerImpl
 from server.server_defines import Project, TaskManager, GraphRagManager
 from server.task_manager import TaskManagerImpl
-from server.web_socket_manager import WebSocketManager
+from server.websocket_manager import WebSocketManagerImpl
 
 # Main logging configuration
 logging.basicConfig(
@@ -33,6 +36,8 @@ db_credentials: Dict[str, Any] = {
 db_driver: neo4j.Driver
 task_manager: TaskManager
 graph_rag_manager: GraphRagManager
+TEMPLATES_DIR = Path(__file__).parent / "templates"
+DASHBOARD_FILE = TEMPLATES_DIR / "dashboard.html"
 
 app = FastAPI(title="Graph RAG Server", version="0.1.0")
 
@@ -60,7 +65,7 @@ async def lifespan(app: FastAPI):
         raise
 
     # Initialize managers
-    task_manager = TaskManagerImpl(db_driver, WebSocketManager.websocket_notifier)
+    task_manager = TaskManagerImpl(db_driver, WebSocketManagerImpl.websocket_notifier)
     graph_rag_manager = GraphRagManagerImpl(db_driver, task_manager)
     logger.info("Managers initialized")
 
@@ -75,15 +80,23 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.exception("Error closing Neo4j driver: %s", e)
 
+@app.get("/", response_class=HTMLResponse)
+async def dashboard(_: Request):
+    try:
+        html = DASHBOARD_FILE.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        html = "<html><body><h3>Dashboard not found</h3><p>Expected at: {}</p></body></html>".format(DASHBOARD_FILE)
+    return HTMLResponse(content=html)
+
 @app.websocket("/ws/{connection_id}")
 async def websocket_route(websocket: WebSocket, connection_id: str):
     """WebSocket endpoint for client connections."""
-    await WebSocketManager.websocket_endpoint(websocket, connection_id)
+    await WebSocketManagerImpl.websocket_endpoint(websocket, connection_id)
 
 @app.websocket("/ws")
 async def websocket_route_auto(websocket: WebSocket):
     """WebSocket endpoint with auto-generated connection ID."""
-    await WebSocketManager.websocket_endpoint(websocket)
+    await WebSocketManagerImpl.websocket_endpoint(websocket)
 
 @app.post("/query")
 async def create_query(project_id: str, query: str = Body(..., embed=True),

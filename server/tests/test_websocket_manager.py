@@ -4,7 +4,7 @@ import json
 import asyncio
 from typing import Dict, Any
 from unittest.mock import Mock, AsyncMock, patch
-from server.web_socket_manager import WebSocketManager
+from server.websocket_manager import WebSocketManagerImpl
 
 
 class MockWebSocket:
@@ -34,7 +34,7 @@ class MockWebSocket:
 @pytest.fixture
 def ws_manager():
     """Fixture providing a WebSocketManager instance."""
-    return WebSocketManager()
+    return WebSocketManagerImpl()
 
 
 @pytest.fixture
