@@ -275,7 +275,7 @@ class RefreshTask(Task):
             if self._task_mgr:
                 self._task_mgr.start_task(self._request_id)
             if self._handler:
-                self._handler(self)
+                self._handler(self._request_id)
             if self._task_mgr:
                 self._task_mgr.complete_task(self._request_id, {})
         except Exception as e:
@@ -460,53 +460,41 @@ class TaskManagerImpl(TaskManager):
         self._thread_pool = ThreadPoolExecutor(max_workers=1)
         self._lock = threading.RLock()
         # Normalize notifier to a callable coroutine function
-        self._websocket_notifier = self._normalize_notifier(websocket_notifier)
+        self._notifiers: Dict[str, Callable[[str, Dict[str, Any]], Awaitable[None]]] = {}
 
-    def _normalize_notifier(self, notifier):
-        """
-        Accepts:
-          - async function (callable returning coroutine)
-          - bound coroutine function
-          - already created coroutine (rare in tests)
-          - None
-        Returns a callable async function notifier(request_id, payload) -> None
-        """
-        if notifier is None:
-            return None
-
-        # If it's a coroutine object (already awaited later would error), wrap it
-        if asyncio.iscoroutine(notifier):
-            async def _wrapped(request_id: str, payload: Dict[str, Any]) -> None:
-                # Drop the already-created coroutine, no-op to avoid TypeError
-                return None
-            return _wrapped
-
-        # If it's a normal callable (sync or async), use as-is
-        if callable(notifier):
-            return notifier
-
-        # Fallback: make a no-op async wrapper
-        async def _noop(request_id: str, payload: Dict[str, Any]) -> None:
-            return None
-        return _noop
+    def add_websocket_notifier(self, session_id: str,
+                               websocket_notifier: Callable[[str, Dict[str, Any]], Awaitable[None]]) -> None:
+        self._notifiers[session_id] = websocket_notifier
 
     def _notify(self, request_id: str, payload: Dict[str, Any]) -> None:
         """
-        Schedule WebSocket notification safely regardless of sync/async context.
-        Ensures we always pass a coroutine to create_task and avoid calling a coroutine object.
+        Dispatch notifications to all registered notifiers, safely handling sync/async contexts.
+
+        - If we're in an event loop: schedule each notifier via create_task (non-blocking).
+        - If we're not in an event loop: run each notifier to completion using asyncio.run, one by one.
         """
-        if not self._websocket_notifier:
-            return
-
-        async def _run():
-            await self._websocket_notifier(request_id, payload)
-
+        # Gather the current loop once (if any)
         try:
             loop = asyncio.get_running_loop()
-            loop.create_task(_run())
         except RuntimeError:
-            # No running loop (e.g., called from a worker thread)
-            asyncio.run(_run())
+            loop = None
+
+        # Define a small helper to produce a per-notifier coroutine
+        async def _run_one(call: Callable[[str, Dict[str, Any]], Awaitable[None]]):
+            try:
+                await call(request_id, payload)
+            except Exception as e:
+                # Avoid breaking the notification fan-out if one notifier fails
+                logging.getLogger(__name__).exception("Notifier failed for request_id: %s, cause: %s", request_id, str(e))
+
+        if loop is not None:
+            # In async context: fan-out by scheduling tasks without awaiting
+            for session_id, notifier in self._notifiers:
+                loop.create_task(_run_one(notifier))
+        else:
+            # In sync context: run each notifier sequentially to completion
+            for session_id, notifier in self._notifiers:
+                asyncio.run(_run_one(notifier))
 
     def add_task(self, task: Task) -> None:
         try:
@@ -541,7 +529,6 @@ class TaskManagerImpl(TaskManager):
                     })
         except Exception as e:
             logger.exception("Error starting task: %s", str(e))
-            return False
 
     def complete_task(self, task: Task, result: Dict[str, Any]) -> None:
         try:
@@ -558,7 +545,6 @@ class TaskManagerImpl(TaskManager):
                     })
         except Exception as e:
             logger.exception("Error completing task: %s", str(e))
-            return False
 
     def fail_task(self, task: Task, error: str) -> None:
         try:
@@ -575,7 +561,6 @@ class TaskManagerImpl(TaskManager):
                     })
         except Exception as e:
             logger.exception("Error failing task: %s", str(e))
-            return False
 
     def cancel_task(self, request_id: str) -> None:
         try:
@@ -591,10 +576,8 @@ class TaskManagerImpl(TaskManager):
                             "success": True,
                             "task_info": task.to_dict()
                         })
-                return False
         except Exception as e:
             logger.exception("Error canceling task: %s", str(e))
-            return False
 
     def get_task(self, request_id: str) -> Optional[Task]:
         """Get a task by request ID."""

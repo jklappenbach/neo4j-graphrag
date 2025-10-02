@@ -67,6 +67,7 @@ async def lifespan(app: FastAPI):
     # Initialize managers
     task_manager = TaskManagerImpl(db_driver, WebSocketManagerImpl.websocket_notifier)
     graph_rag_manager = GraphRagManagerImpl(db_driver, task_manager)
+    websocket_manager = WebSocketManagerImpl()
     logger.info("Managers initialized")
 
     yield
@@ -173,3 +174,109 @@ if __name__ == "__main__":
             "Uvicorn is not installed. Install with `pip install uvicorn[standard]` and run: "
             "python server.py"
         )
+
+##############################################################
+# Python
+import asyncio
+import json
+import uuid
+from typing import Dict, Any
+
+from fastapi import FastAPI, WebSocket
+from fastapi.responses import HTMLResponse
+from starlette.websockets import WebSocketDisconnect
+
+app = FastAPI()
+
+# In-memory connection storage
+connections: Dict[str, WebSocket] = {}
+request_to_connection: Dict[str, str] = {}
+
+@app.get("/")
+async def index():
+    return HTMLResponse("<html><body><h3>WS server running</h3></body></html>")
+
+@app.websocket("/ws")
+async def ws_endpoint(websocket: WebSocket):
+    connection_id = str(uuid.uuid4())
+    await websocket.accept()
+    connections[connection_id] = websocket
+    try:
+        # Inform client of connection_id
+        await websocket.send_text(json.dumps({
+            "type": "ws_connected",
+            "connection_id": connection_id,
+            "success": True
+        }))
+
+        while True:
+            data = await websocket.receive_text()
+            msg = json.loads(data)
+            mtype = msg.get("type")
+            if mtype == "register_request":
+                req_id = msg.get("request_id")
+                if not req_id:
+                    await websocket.send_text(json.dumps({
+                        "type": "error",
+                        "error": "missing request_id"
+                    }))
+                    continue
+                request_to_connection[req_id] = connection_id
+                await websocket.send_text(json.dumps({
+                    "type": "request_registered",
+                    "request_id": req_id,
+                    "success": True
+                }))
+            else:
+                await websocket.send_text(json.dumps({
+                    "type": "error",
+                    "error": f"unsupported message type: {mtype}"
+                }))
+    except WebSocketDisconnect:
+        pass
+    finally:
+        # Cleanup on disconnect
+        connections.pop(connection_id, None)
+        for rid, cid in list(request_to_connection.items()):
+            if cid == connection_id:
+                request_to_connection.pop(rid, None)
+
+async def notify(request_id: str, payload: Dict[str, Any]) -> None:
+    """Send a message addressed by request_id to its mapped connection."""
+    connection_id = request_to_connection.get(request_id)
+    if not connection_id:
+        return
+    ws = connections.get(connection_id)
+    if not ws:
+        return
+    payload = dict(payload)
+    payload["request_id"] = request_id
+    try:
+        await ws.send_text(json.dumps(payload))
+    except Exception:
+        # If sending fails, drop the connection mapping
+        connections.pop(connection_id, None)
+        for rid, cid in list(request_to_connection.items()):
+            if cid == connection_id:
+                request_to_connection.pop(rid, None)
+
+# Demo task flow: enqueue -> started -> completed
+@app.post("/demo/start")
+async def demo_start():
+    request_id = str(uuid.uuid4())
+
+    async def run_task():
+        await notify(request_id, {"type": "task_enqueued", "success": True})
+        await asyncio.sleep(0.5)
+        await notify(request_id, {"type": "task_started", "success": True})
+        await asyncio.sleep(1.0)
+        await notify(request_id, {
+            "type": "task_completed",
+            "success": True,
+            "result": {"answer": 42}
+        })
+
+    # Fire-and-forget
+    asyncio.create_task(run_task())
+    # Return immediate ACK
+    return {"request_id": request_id, "ok": True}

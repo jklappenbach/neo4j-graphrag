@@ -7,7 +7,7 @@ from dataclasses import field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Dict, Any, Optional, Tuple, LiteralString, List
+from typing import Dict, Any, Optional, Tuple, LiteralString, List, Callable, Awaitable
 
 from neo4j import Record
 from websocket import WebSocket
@@ -107,6 +107,10 @@ class TaskManager(ABC):
 
     @abstractmethod
     def cancel_task(self, request_id):
+        pass
+
+    @abstractmethod
+    def add_websocket_notifier(self, session_id: str, websocket_notifier: Callable[[str, Dict[str, Any]], Awaitable[None]]):
         pass
 
 

@@ -11,24 +11,34 @@ from server.task_manager import TaskManager
 
 logger = logging.getLogger(__name__)
 
+websocket_manager: WebSocketManager
 
 class WebSocketManagerImpl(WebSocketManager):
     """Manages WebSocket connections and routing of TaskManager notifications to clients."""
-    _task_mgr: TaskManager
+
     def __init__(self):
         self._connections: Dict[str, WebSocket] = {}
         self._request_to_connection: Dict[str, str] = {}
+        self._task_mgr: TaskManager | None = None
 
     def set_task_manager(self, task_mgr: TaskManager) -> None:
         self._task_mgr = task_mgr
         logger.info("TaskManager set")
 
-    # TODO Need to make this concurrent proof.
     async def connect(self, websocket: WebSocket, connection_id: str):
         """Register a new WebSocket connection."""
         await websocket.accept()
         self._connections[connection_id] = websocket
         logger.info("WebSocket connection established: %s", connection_id)
+        # Immediately notify the client of the assigned connection id for request mapping
+        try:
+            await websocket.send_text(json.dumps({
+                "type": "ws_connected",
+                "connection_id": connection_id,
+                "success": True
+            }))
+        except Exception:
+            logger.exception("Failed to send ws_connected for %s", connection_id)
 
     def disconnect(self, connection_id: str):
         """Remove a WebSocket connection and clean mappings."""
@@ -74,65 +84,36 @@ class WebSocketManagerImpl(WebSocketManager):
 
         return ok
 
-    # TODO Figure out if we still need this and how we integrate it if we do.  Old
-    # code that still has a reference.
-    async def handle_message(self, connection_id: str, message: Dict[str, Any]):
-        """Process incoming WebSocket messages and route to GraphRagManager."""
-        try:
-            msg_type = message.get("type")
-            request_id = message.get("request_id", str(uuid.uuid4()))
-
-            # Register this request with the connection
-            self.register_request(request_id, connection_id)
-
-            if msg_type == "query":
-                query = message.get("query", "")
-                response = self._graph_rag_manager.query(request_id, query)
-                # Don't send response here - it will be sent by the task completion handler
-
-            elif msg_type == "cancel":
-                target_request_id = message.get("target_request_id", request_id)
-                response = self._graph_rag_manager.cancel_query(target_request_id)
-                await self.send_response(request_id, {
-                    "type": "cancel_response",
-                    "success": response.get("ok", False),
-                    "error": response.get("error")
-                })
-
-            elif msg_type == "refresh":
-                response = self._graph_rag_manager.refresh_documents(request_id)
-                # Don't send response here - it will be sent by the task completion handler
-
-            elif msg_type == "list_documents":
-                try:
-                    documents = self._graph_rag_manager.list_documents(request_id)
-                    await self.send_response(request_id, {
-                        "type": "list_documents_response",
-                        "documents": documents,
-                        "success": True
-                    })
-                except Exception as e:
-                    await self.send_response(request_id, {
-                        "type": "list_documents_response",
-                        "success": False,
-                        "error": str(e)
-                    })
-
-            else:
-                await self.send_response(request_id, {
+    async def handle_message(self, connection_id: str, message: Dict[str, Any]) -> None:
+        """
+        Handle messages from client over WS.
+        Expected messages:
+          - {"type":"register_request","request_id":"..."} to bind future task notifications to this connection.
+        """
+        msg_type = message.get("type")
+        if msg_type == "register_request":
+            req_id = message.get("request_id")
+            if not req_id:
+                await self.send_message(connection_id, {
                     "type": "error",
                     "success": False,
-                    "error": f"Unknown message type: {msg_type}"
+                    "error": "Missing request_id for register_request"
                 })
-
-        except Exception as e:
-            logger.exception(f"Error handling message from {connection_id}: {e}")
+                return
+            self.register_request(req_id, connection_id)
             await self.send_message(connection_id, {
-                "type": "error",
-                "success": False,
-                "error": str(e),
-                "request_id": message.get("request_id")
+                "type": "request_registered",
+                "request_id": req_id,
+                "success": True
             })
+            return
+
+        # Unknown/unsupported message types
+        await self.send_message(connection_id, {
+            "type": "error",
+            "success": False,
+            "error": f"Unsupported message type: {msg_type or 'unknown'}"
+        })
 
     @staticmethod
     async def websocket_endpoint(websocket: WebSocket, connection_id: str = None):
@@ -159,19 +140,21 @@ class WebSocketManagerImpl(WebSocketManager):
         except Exception as e:
             logger.exception(f"WebSocket error for connection {connection_id}: {e}")
             websocket_manager.disconnect(connection_id)
+
     @staticmethod
     async def websocket_notifier(request_id: str, response: Dict[str, Any]) -> None:
         await websocket_manager.send_response(request_id, response)
 
-# Global WebSocket manager instance
-websocket_manager: WebSocketManagerImpl
 
-def init_websocket_manager(task_mgr: TaskManager):
-    """Initialize the global WebSocket manager."""
-    global websocket_manager
-    websocket_manager = WebSocketManagerImpl()
-
-    # task_mgr.set_websocket_notifier(websocket_notifier)
-    return websocket_manager
-
-
+# def init_websocket_manager(task_mgr: TaskManager):
+#     """Initialize the global WebSocket manager."""
+#     global websocket_manager
+#     websocket_manager = WebSocketManagerImpl()
+#     websocket_manager.set_task_manager(task_mgr)
+#     # Wire TaskManager -> WS notifier so TaskManager can push updates
+#     try:
+#         task_mgr.add_websocket_notifier("server-bus", WebSocketManagerImpl.websocket_notifier)
+#     except Exception as e:
+#         # If TaskManager doesn't support this yet, leave a log to implement.
+#         logger.warning("TaskManager does not support set_websocket_notifier; task updates won't be pushed via WS: %s", str(e))
+#     return websocket_manager

@@ -1,134 +1,206 @@
 # ... existing code ...
 import json
+import uuid
 from typing import Any, Dict, List, Optional
-
+import requests
 import httpx
 import websockets
 import asyncio
+import json
+import threading
+import time
+from dataclasses import dataclass
+from typing import Any, Dict, Optional, Callable
+import websocket
 
 DEFAULT_BASE_URL = "http://localhost:8000"
 DEFAULT_WS_URL = "ws://localhost:8000/ws"
 
-class GraphRagClient:
-    def __init__(self, base_url: str = DEFAULT_BASE_URL, ws_url: str = DEFAULT_WS_URL, timeout: float = 30.0):
+@dataclass
+class WsEvent:
+    type: str
+    payload: Dict[str, Any]
+
+class AsyncClient:
+    """
+    HTTP ack + WebSocket notifications client.
+
+    - call_* methods return {"request_id": "..."} immediately.
+    - Events for that request_id arrive via WebSocket.
+    """
+    def __init__(self, base_url: str):
+        self._session_id = uuid.uuid4()
         self.base_url = base_url.rstrip("/")
-        self.ws_url = ws_url
-        self._client = httpx.Client(base_url=self.base_url, timeout=timeout)
+        self._ws_url = self.base_url.replace("http", "ws") + "/ws"
+        self._ws = None
+        self._ws_thread: Optional[threading.Thread] = None
+        self._should_run = False
+        self._on_event: Optional[Callable[[WsEvent], None]] = None
+        self._pending_register: "set[str]" = set()
+        self._lock = threading.Lock()
 
-    # ----------------------
-    # Projects CRUD
-    # ----------------------
-    def create_project(self, name: str, source_roots: List[str], args: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def start_ws(self, on_event: Optional[Callable[[WsEvent], None]] = None):
+        if websocket is None:
+            raise RuntimeError("websocket-client package is required for WS support")
+        self._on_event = on_event
+        if self._ws and self._ws_thread and self._ws_thread.is_alive():
+            return
+        self._should_run = True
+
+        def _run():
+            while self._should_run:
+                try:
+                    ws = websocket.WebSocketApp(
+                        self._ws_url,
+                        on_open=self._on_open,
+                        on_message=self._on_message,
+                        on_close=self._on_close,
+                        on_error=self._on_error,
+                    )
+                    self._ws = ws
+                    ws.run_forever()
+                except Exception:
+                    time.sleep(2)  # backoff
+        self._ws_thread = threading.Thread(target=_run, daemon=True)
+        self._ws_thread.start()
+
+    def stop_ws(self):
+        self._should_run = False
+        if self._ws:
+            try:
+                self._ws.close()
+            except Exception:
+                pass
+        if self._ws_thread:
+            self._ws_thread.join(timeout=2)
+
+    # ---- WS callbacks ----
+    def _on_open(self, ws):
+        # Register any pending request_ids queued before the socket connected
+        with self._lock:
+            pending = list(self._pending_register)
+        for rid in pending:
+            self._send_register(rid)
+
+    def _on_message(self, ws, message: str):
+        try:
+            msg = json.loads(message)
+        except Exception:
+            return
+        evt = WsEvent(type=msg.get("type") or "", payload=msg)
+        if self._on_event:
+            self._on_event(evt)
+
+    def _on_close(self, ws, *args):
+        pass
+
+    def _on_error(self, ws, err):
+        pass
+
+    def _send_register(self, request_id: str):
+        if not self._ws:
+            return
+        try:
+            self._ws.send(json.dumps({"type": "register_request", "request_id": request_id}))
+        except Exception:
+            # if send fails, queue it to attempt on next connect
+            with self._lock:
+                self._pending_register.add(request_id)
+
+    def _register_session(self, resp: requests.Response) -> Dict[str, Any]:
+        resp.raise_for_status()
+        data = resp.json() if resp.content else {}
+        request_id = data.get("request_id") or data.get("requestId")
+        if request_id:
+            # attempt immediate register; if socket not ready, queue it
+            if self._ws:
+                self._send_register(request_id)
+            else:
+                with self._lock:
+                    self._pending_register.add(request_id)
+        return {"request_id": request_id}
+
+    # ---- HTTP methods that return ACKs ----
+    def create_project(self, name: str, source_roots: list[str], args: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         payload = {"name": name, "source_roots": source_roots, "args": args or {}}
-        r = self._client.post("/api/projects", json=payload)
-        r.raise_for_status()
-        return r.json()
+        r = requests.post(f"{self.base_url}/api/projects", json=payload, timeout=60)
+        return self._register_session(r)
 
-    def list_projects(self) -> List[Dict[str, Any]]:
-        r = self._client.get("/api/projects")
-        r.raise_for_status()
-        return r.json()
-
-    def get_project(self, project_id: str) -> Dict[str, Any]:
-        r = self._client.get(f"/api/projects/{project_id}")
-        r.raise_for_status()
-        return r.json()
-
-    def update_project(self, project_id: str, name: Optional[str] = None,
-                       source_roots: Optional[List[str]] = None,
-                       args: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        payload: Dict[str, Any] = {}
-        if name is not None:
-            payload["name"] = name
-        if source_roots is not None:
-            payload["source_roots"] = source_roots
-        if args is not None:
-            payload["args"] = args
-        r = self._client.patch(f"/api/projects/{project_id}", json=payload)
-        r.raise_for_status()
-        return r.json()
+    def update_project(self, project_id: str, updates: Dict[str, Any]) -> Dict[str, Any]:
+        r = requests.patch(f"{self.base_url}/api/projects/{project_id}", json=updates, timeout=60)
+        return self._register_session(r)
 
     def delete_project(self, project_id: str) -> Dict[str, Any]:
-        r = self._client.delete(f"/api/projects/{project_id}")
-        r.raise_for_status()
-        return r.json()
+        r = requests.delete(f"{self.base_url}/api/projects/{project_id}", timeout=60)
+        return self._register_session(r)
 
-    # ----------------------
-    # Sync API
-    # ----------------------
-    def sync_project(self, project_id: str, force: bool = False) -> Dict[str, Any]:
-        r = self._client.post(f"/api/projects/{project_id}/sync", json={"force": force})
-        r.raise_for_status()
-        return r.json()
+    def list_documents(self, project_id: str) -> Dict[str, Any]:
+        r = requests.get(f"{self.base_url}/api/projects/{project_id}/documents", timeout=60)
+        return self._register_session(r)
 
-    # ----------------------
-    # Query API
-    # ----------------------
-    def start_query(self, project_id: str, query: str, args: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """
-        Starts a query. Expects server to enqueue and return { ok, request_id, ... }.
-        """
-        payload = {"query": query, "args": args or {}}
-        r = self._client.post(f"/api/projects/{project_id}/query", json=payload)
-        r.raise_for_status()
-        return r.json()
+    def refresh_documents(self, project_id: str) -> Dict[str, Any]:
+        r = requests.post(f"{self.base_url}/api/projects/{project_id}/documents:refresh", timeout=60)
+        return self._register_session(r)
+
+    def query(self, project_id: str, query_str: str, args: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        payload = {"query": query_str, "args": args or {}}
+        r = requests.post(f"{self.base_url}/api/projects/{project_id}/query", json=payload, timeout=300)
+        return self._register_session(r)
 
     def cancel_query(self, request_id: str) -> Dict[str, Any]:
-        """
-        Cancels a query by request_id.
-        """
-        r = self._client.post(f"/api/queries/{request_id}/cancel")
-        r.raise_for_status()
-        return r.json()
-
-    def get_query_result(self, request_id: str) -> Dict[str, Any]:
-        """
-        Polls for a query result by request_id, if your server exposes such endpoint.
-        """
-        r = self._client.get(f"/api/queries/{request_id}")
-        r.raise_for_status()
-        return r.json()
-
-    # ----------------------
-    # Tasks API
-    # ----------------------
-    def list_scheduled_operations(self) -> Dict[str, Any]:
-        r = self._client.get("/api/tasks/scheduled")
-        r.raise_for_status()
-        return r.json()
-
-    # ----------------------
-    # WebSocket
-    # ----------------------
-    async def listen_ws(self, on_message, path: Optional[str] = None):
-        """
-        Connect to WebSocket and receive messages.
-        on_message: async or sync callable that receives parsed message (dict or str)
-        path: optional suffix path to append to ws_url, e.g. "/notifications"
-        """
-        url = self.ws_url if not path else self.ws_url.rstrip("/") + path
-        async with websockets.connect(url) as ws:
-            async for msg in ws:
-                try:
-                    data = json.loads(msg)
-                except Exception:
-                    data = msg
-                if asyncio.iscoroutinefunction(on_message):
-                    await on_message(data)
-                else:
-                    on_message(data)
-
-# Convenience run example
-async def _print_ws(msg):
-    print("WS:", msg)
+        r = requests.post(f"{self.base_url}/api/tasks/{request_id}:cancel", timeout=30)
+        return self._register_session(r)
 
 def example_usage():
-    client = GraphRagClient()
-    # REST calls
-    projects = client.list_projects()
-    print("Projects:", projects)
-    # WebSocket
-    asyncio.run(client.listen_ws(_print_ws))
+    """
+    Demonstrates basic usage:
+      - start WS and event handler
+      - create a project (ACK only)
+      - run a query (ACK only)
+      - handle async task_* updates via WS
+    """
+    events: List[dict] = []
 
+    def on_event(evt):
+        # evt.type is like 'task_enqueued'|'task_started'|'task_completed'|'task_failed'
+        # evt.payload contains full message, including 'request_id'
+        print(f"[WS EVENT] {evt.type}: {evt.payload}")
+        events.append(evt.payload)
+
+    client = AsyncClient(base_url="http://localhost:8000")
+    client.start_ws(on_event=on_event)
+
+    # Create a project (returns ACK)
+    ack1 = client.create_project(
+        name="My Project",
+        source_roots=["/path/to/src"],
+        args={"embedder_model_name": "default"}
+    )
+    print("Create project ACK:", ack1)
+
+    # Run a query (returns ACK)
+    ack2 = client.query(
+        project_id="your-project-id",
+        query_str="How is the code organized?",
+        args={"temperature": 0.2}
+    )
+    print("Query ACK:", ack2)
+
+    # Let events arrive for a bit (in a real app, integrate with your event loop/UI)
+    time.sleep(5)
+
+    # Optionally, cancel a query using its request_id
+    if ack2.get("request_id"):
+        cancel_ack = client.cancel_query(ack2["request_id"])
+        print("Cancel query ACK:", cancel_ack)
+
+    # Shutdown WS when done
+    client.stop_ws()
+
+    return {
+        "create_project_request_id": ack1.get("request_id"),
+        "query_request_id": ack2.get("request_id"),
+        "received_events_count": len(events),
+    }
 if __name__ == "__main__":
     example_usage()
