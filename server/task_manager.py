@@ -11,7 +11,7 @@ import neo4j
 from neo4j import Record
 from watchdog.events import FileSystemEvent
 
-from server.server_defines import Task, TaskManager, FileEventType
+from server.server_defines import Task, TaskManager, FileEventType, WebSocketManager
 from server.task_dao import TaskDAO
 
 logger = logging.getLogger(__name__)
@@ -454,47 +454,37 @@ class TaskFactory:
 class TaskManagerImpl(TaskManager):
 
     def __init__(self, driver: neo4j.Driver,
-                 websocket_notifier: Callable[[str, Dict[str, Any]], Awaitable[None]] | Awaitable[None] | None):
+                 websocket_manager: WebSocketManager):
         self._records: Dict[str, Task] = {}
         self._dao = TaskDAO(driver)
         self._thread_pool = ThreadPoolExecutor(max_workers=1)
         self._lock = threading.RLock()
-        # Normalize notifier to a callable coroutine function
-        self._notifiers: Dict[str, Callable[[str, Dict[str, Any]], Awaitable[None]]] = {}
-
-    def add_websocket_notifier(self, session_id: str,
-                               websocket_notifier: Callable[[str, Dict[str, Any]], Awaitable[None]]) -> None:
-        self._notifiers[session_id] = websocket_notifier
+        self._websocket_manager = websocket_manager
 
     def _notify(self, request_id: str, payload: Dict[str, Any]) -> None:
         """
-        Dispatch notifications to all registered notifiers, safely handling sync/async contexts.
-
-        - If we're in an event loop: schedule each notifier via create_task (non-blocking).
-        - If we're not in an event loop: run each notifier to completion using asyncio.run, one by one.
+        Send a notification to all connected WebSocket clients using WebSocketManager.
+        Ensures proper behavior whether we're in an async or sync context.
         """
-        # Gather the current loop once (if any)
+        # Include request_id in the payload
+        message = dict(payload)
+        message["request_id"] = request_id
+
+        async def _send_all():
+            try:
+                await self._websocket_manager.send_message_all(message)
+            except Exception as e:
+                logger.exception("WebSocket broadcast failed for request_id=%s: %s", request_id, str(e))
+
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             loop = None
 
-        # Define a small helper to produce a per-notifier coroutine
-        async def _run_one(call: Callable[[str, Dict[str, Any]], Awaitable[None]]):
-            try:
-                await call(request_id, payload)
-            except Exception as e:
-                # Avoid breaking the notification fan-out if one notifier fails
-                logging.getLogger(__name__).exception("Notifier failed for request_id: %s, cause: %s", request_id, str(e))
-
         if loop is not None:
-            # In async context: fan-out by scheduling tasks without awaiting
-            for session_id, notifier in self._notifiers:
-                loop.create_task(_run_one(notifier))
+            loop.create_task(_send_all())
         else:
-            # In sync context: run each notifier sequentially to completion
-            for session_id, notifier in self._notifiers:
-                asyncio.run(_run_one(notifier))
+            asyncio.run(_send_all())
 
     def add_task(self, task: Task) -> None:
         try:
@@ -509,7 +499,7 @@ class TaskManagerImpl(TaskManager):
                         "type": "task_enqueued",
                         "task_type": task.get_task_type(),
                         "success": True,
-                        "task_info": task.to_dict()
+                        "task_info": task.to_dict(),
                     })
         except Exception as e:
             logger.exception("Error adding task: %s", str(e))

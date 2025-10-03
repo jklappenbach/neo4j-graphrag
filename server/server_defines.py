@@ -109,11 +109,6 @@ class TaskManager(ABC):
     def cancel_task(self, request_id):
         pass
 
-    @abstractmethod
-    def add_websocket_notifier(self, session_id: str, websocket_notifier: Callable[[str, Dict[str, Any]], Awaitable[None]]):
-        pass
-
-
 class Task(ABC):
     _request_id: str
     _project_id: str
@@ -378,19 +373,11 @@ class WebSocketManager(ABC):
     _task_mgr: TaskManager
 
     @abstractmethod
-    def set_task_manager(self, task_mgr: TaskManager) -> None:
+    async def connect(self, websocket: WebSocket, connection_id: str) -> None:
         pass
 
     @abstractmethod
-    async def connect(self, websocket: WebSocket, connection_id: str):
-        pass
-
-    @abstractmethod
-    def disconnect(self, connection_id: str):
-        pass
-
-    @abstractmethod
-    def register_request(self, request_id: str, connection_id: str):
+    def disconnect(self, connection_id: str) -> None:
         pass
 
     @abstractmethod
@@ -398,7 +385,7 @@ class WebSocketManager(ABC):
         pass
 
     @abstractmethod
-    async def send_response(self, request_id: str, message: Dict[str, Any]) -> bool:
+    async def send_message_all(self, message) -> None:
         pass
 
 
