@@ -9,6 +9,7 @@ from typing import Any, Dict, Iterable, List
 import neo4j
 from haystack import tracing
 from haystack.components.converters import TextFileToDocument
+from haystack.components.routers import FileTypeRouter
 from haystack.components.writers import DocumentWriter
 from haystack.core.pipeline import Pipeline
 from haystack.document_stores.types import DuplicatePolicy
@@ -79,6 +80,7 @@ class _ProjectEntry:
             )
 
             # Define the ingestion pipeline
+            self.file_type_router = FileTypeRouter()
             self.text_converter = TextFileToDocument()
             self.rel_extractor = CodeRelationshipExtractor()
             self.doc_splitter = CodeAwareSplitter()
@@ -87,7 +89,8 @@ class _ProjectEntry:
 
             # Create the pipeline
             self.ingestion_pipeline = Pipeline()
-            self.ingestion_pipeline.add_component("converter", self.text_converter)
+            self.ingestion_pipeline.add_component(instance=self.file_type_router, name="file_type_router")
+            self.ingestion_pipeline.add_component(instance=self.text_converter, name="converter")
             self.ingestion_pipeline.add_component("splitter", self.doc_splitter)
             self.ingestion_pipeline.add_component("extractor", self.rel_extractor)
             self.ingestion_pipeline.add_component("embedder", self.document_embedder)
