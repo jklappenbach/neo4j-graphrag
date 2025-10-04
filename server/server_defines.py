@@ -1,3 +1,4 @@
+import dataclasses
 import json
 import logging
 import time
@@ -7,7 +8,7 @@ from dataclasses import field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Dict, Any, Optional, Tuple, LiteralString, List, Callable, Awaitable
+from typing import Dict, Any, Optional, Tuple, LiteralString, List
 
 from neo4j import Record
 from websocket import WebSocket
@@ -78,6 +79,8 @@ class Project:
     def embedder_model_name(self):
         return self._embedder_model_name
 
+    def to_dict(self) -> Dict[str, Any]:
+        return self.__dict__
 
 class TaskManager(ABC):
     """Abstract base class for status tracking implementations."""
@@ -102,11 +105,11 @@ class TaskManager(ABC):
         pass
 
     @abstractmethod
-    def list_active_tasks(self) -> List['Task']:
+    def list_active_tasks(self, request_id: str) -> List['Task']:
         pass
 
     @abstractmethod
-    def cancel_task(self, request_id):
+    def cancel_task(self, request_id: str):
         pass
 
 class Task(ABC):
@@ -279,23 +282,23 @@ class GraphRagManager(ABC):
         pass
 
     @abstractmethod
-    def list_projects(self):
+    def list_projects(self, request_id: str):
         pass
 
     @abstractmethod
-    def get_project(self, project_id):
+    def get_project(self, request_id: str, project_id: str):
         pass
 
     @abstractmethod
-    def update_project(self, project_id, name, source_roots, args):
+    def update_project(self, request_id: str, project_id: str, args: Dict[str, Any]):
         pass
 
     @abstractmethod
-    def delete_project(self, project_id):
+    def delete_project(self, request_id: str, project_id: str) -> None:
         pass
 
     @abstractmethod
-    def sync_project(self, project_id: str, force_all: bool = False) -> Dict[str, Any]:
+    def sync_project(self, reqeust_id: str, project_id: str, force_all: bool = False) -> Dict[str, Any]:
         pass
 
     @abstractmethod
@@ -307,15 +310,15 @@ class GraphRagManager(ABC):
         pass
 
     @abstractmethod
-    def handle_add_path(self, project_id: str, path: Path) -> None:
+    def handle_add_path(self, project_id: str, path_str: str) -> None:
         pass
 
     @abstractmethod
-    def handle_update_path(self, project_id: str, path: Path) -> None:
+    def handle_update_path(self, project_id: str, path_str: str) -> None:
         pass
 
     @abstractmethod
-    def handle_delete_path(self, project_id: str, path: Path) -> None:
+    def handle_delete_path(self, project_id: str, path_str: str) -> None:
         pass
 
     @abstractmethod
@@ -331,9 +334,8 @@ class GraphRagManager(ABC):
         pass
 
     @abstractmethod
-    def set_websocket_notifier(self, websocket_notifier):
+    def stop(self) -> None:
         pass
-
 
 
 class ProjectManager(ABC):
@@ -368,6 +370,10 @@ class ProjectManager(ABC):
         """Delete a project and drop its Neo4j database."""
         raise NotImplementedError
 
+    @abstractmethod
+    def stop(self) -> None:
+        pass
+
 class WebSocketManager(ABC):
     """Manages WebSocket connections and routing of TaskManager notifications to clients."""
     _task_mgr: TaskManager
@@ -388,4 +394,6 @@ class WebSocketManager(ABC):
     async def send_message_all(self, message) -> None:
         pass
 
-
+    @abstractmethod
+    def stop(self) -> None:
+        pass

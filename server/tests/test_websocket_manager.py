@@ -1,9 +1,9 @@
 """Unit tests for WebSocketManager component."""
-import pytest
-import json
 import asyncio
-from typing import Dict, Any
-from unittest.mock import Mock, AsyncMock, patch
+import json
+
+import pytest
+
 from server.websocket_manager import WebSocketManagerImpl
 
 

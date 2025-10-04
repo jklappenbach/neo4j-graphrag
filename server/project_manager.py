@@ -1,6 +1,6 @@
 import logging
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, LiteralString
 
 from neo4j import Driver
 
@@ -85,7 +85,7 @@ class ProjectManagerImpl(ProjectManager):
         try:
             with self.driver.session(database=self.CATALOG_DB) as sess:
                 rec = sess.run(
-                    "MATCH (p:Project {id: $id}) RETURN p LIMIT 1", id=project_id
+                    "MATCH (p:Project {project_id: $id}) RETURN p LIMIT 1", id=project_id
                 ).single()
                 if not rec:
                     return None
@@ -125,22 +125,17 @@ class ProjectManagerImpl(ProjectManager):
         args: Dict[str, Any] = None
     ) -> Dict[str, Any]:
         logger.info("update_project called: id=%s", project_id)
-
         current = self.get_project(project_id)
         if current is None:
             raise ValueError(f"Project not found: {project_id}")
 
-        updates = {}
+        if args is None or len(args) == 0:
+            return current.__dict__
 
-        if args is not None:
-            updates = updates | args
         try:
-            if not updates:
-                return current.to_dict()
-
             # If name changes, we need to rename database: create new DB and drop old
-            old_name = current["name"]
-            new_name = updates.get("name", old_name)
+            old_name = current.name
+            new_name = args.get("name", old_name)
             if new_name != old_name:
                 with self.driver.session(database="system") as sys_sess:
                     # Create new database if not exists
@@ -152,12 +147,12 @@ class ProjectManagerImpl(ProjectManager):
             # Apply metadata updates
             set_clauses = []
             params: Dict[str, Any] = {"project_id": project_id}
-            for key, val in updates.items():
+            for key, val in args.items():
                 set_clauses.append(f"p.{key} = ${key}")
                 params[key] = val
 
             set_fragment = ", ".join(set_clauses)
-            cypher = f"""
+            cypher: LiteralString = f"""
                 MATCH (p:Project {{project_id: $project_id}})
                 SET {set_fragment}
                 RETURN p
@@ -200,3 +195,6 @@ class ProjectManagerImpl(ProjectManager):
         except Exception as e:
             logger.exception("Error in delete_project: %s", e)
             raise
+
+    def stop(self) -> None:
+        pass

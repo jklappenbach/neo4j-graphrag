@@ -1,7 +1,6 @@
 import asyncio
 import json
 import logging
-import uuid
 from typing import Any, Dict
 
 from fastapi import WebSocket
@@ -68,3 +67,8 @@ class WebSocketManagerImpl(WebSocketManager):
             ok = await self.send_message(connection_id, message)
             if ok == False:
                 logger.warning("Failed to send message to %s", connection_id)
+
+    def stop(self) -> None:
+        for connection_id in self._connections:
+            del self._connections[connection_id]
+        self._connections.clear()

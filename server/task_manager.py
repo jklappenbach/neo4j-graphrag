@@ -3,7 +3,6 @@ import json
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from typing import Awaitable
 from typing import Optional, Dict, Any, Callable, List
 from typing import Tuple, LiteralString
 
@@ -18,14 +17,16 @@ logger = logging.getLogger(__name__)
 
 
 class FileTask(Task):
-    def __init__(self, request_id: str, project_id: str, file_system_event: FileSystemEvent,
+    def __init__(self, request_id: str, project_id: str, src_path: str, dest_path: str, is_directory: bool,
                  event_type: FileEventType,
-                 handler: Callable[[FileSystemEvent], bool],
+                 handler: Callable[[str, str, bool], None],
                  task_mgr: TaskManager) -> None:
         super().__init__(request_id, project_id, task_mgr)
-        self._event = file_system_event
         self._event_type = event_type
         self._handler = handler
+        self._src_path = src_path
+        self._dest_path = dest_path
+        self._is_directory = is_directory
 
     @classmethod
     def from_record(cls, record: Record) -> Task:
@@ -39,7 +40,6 @@ class FileTask(Task):
         instance._dest_path = record.get("dest_path")
         instance._is_directory = record.get("is_directory")
         instance._handler = None  # Cannot reconstruct handler from DB
-        instance._event = None  # Cannot reconstruct event from DB
 
         return instance
 
@@ -52,8 +52,8 @@ class FileTask(Task):
         try:
             if self._task_mgr:
                 self._task_mgr.start_task(self._request_id)
-            if self._handler and self._event:
-                self._handler(self._event)
+            if self._handler:
+                self._handler(self._event_type, self._src_path, self._dest_path, self._is_directory)
             if self._task_mgr:
                 self._task_mgr.complete_task(self._request_id, {})
         except Exception as e:
@@ -86,9 +86,9 @@ class FileTask(Task):
             "project_id": self._project_id,
             "task_type": self.get_task_type(),
             "event_type": self._event_type.value,
-            "src_path": self._event.src_path if self._event else self._src_path,
-            "dest_path": self._event.dest_path if self._event else self._dest_path,
-            "is_directory": self._event.is_directory if self._event else self._is_directory,
+            "src_path": self._src_path,
+            "dest_path": self._dest_path,
+            "is_directory": self._is_directory,
             "status": self._task_status.value,
             "created_at": self._created_at,
             "started_at": self._started_at,
@@ -122,9 +122,9 @@ class FileTask(Task):
             "project_id": self._project_id,
             "task_type": self.get_task_type(),
             "event_type": self._event_type.value,
-            "src_path": self._event.src_path if self._event else self._src_path,
-            "dest_path": self._event.dest_path if self._event else self._dest_path,
-            "is_directory": self._event.is_directory if self._event else self._is_directory,
+            "src_path": self._src_path,
+            "dest_path": self._dest_path,
+            "is_directory": self._is_directory,
             "status": self._task_status.value,
             "created_at": self._created_at,
             "started_at": self._started_at,
@@ -138,10 +138,10 @@ class FileTask(Task):
     def to_dict(self) -> Dict[str, Any]:
         """Convert the record to a dictionary for serialization."""
         result = super().to_dict()
-        result["event_type"] = self._event_type.value if hasattr(self, '_event_type') else None
-        result["src_path"] = self._event.src_path if self._event else getattr(self, '_src_path', None)
-        result["dest_path"] = self._event.dest_path if self._event else getattr(self, '_dest_path', None)
-        result["is_directory"] = self._event.is_directory if self._event else getattr(self, '_is_directory', None)
+        result["event_type"] = self._event_type
+        result["src_path"] = self._src_path
+        result["dest_path"] = self._dest_path
+        result["is_directory"] = self._is_directory
         return result
 
 
@@ -574,8 +574,11 @@ class TaskManagerImpl(TaskManager):
         with self._lock:
             return self._records.get(request_id)
 
-    def list_active_tasks(self) -> List[Task]:
+    def list_active_tasks(self, request_id: str) -> List[Task]:
         """Get all active (non-finished) tasks."""
+        logger.info("Listing active tasks for request_id: %s", request_id)
         with self._lock:
             return [task for task in self._records.values() if not task.is_finished]
 
+    def stop(self) -> None:
+        self._thread_pool.shutdown(wait=True)

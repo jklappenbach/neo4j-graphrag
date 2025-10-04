@@ -1,6 +1,7 @@
 import hashlib
 import logging
 import os
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
@@ -22,8 +23,8 @@ from server.code_aware_splitter import CodeAwareSplitter
 from server.code_relationship_extractor import CodeRelationshipExtractor
 from server.graph_document_expander import GraphAwareRetriever
 from server.project_manager import ProjectManagerImpl
-from server.server_defines import GraphRagManager, Project, TaskManager
-from server.task_manager import RefreshTask, QueryTask, ListDocumentsTask
+from server.server_defines import GraphRagManager, Project, TaskManager, FileEventType
+from server.task_manager import RefreshTask, QueryTask, ListDocumentsTask, FileTask
 
 logging.getLogger("haystack").setLevel(logging.DEBUG)
 
@@ -115,9 +116,10 @@ class GraphRagManagerImpl(GraphRagManager):
         self._task_mgr = task_mgr
         self._project_mgr = ProjectManagerImpl(self._db_driver)
         self._project_entries: Dict[str, _ProjectEntry] = {}
+        self._load_and_activate_all_projects()
 
     # ---------------------
-    # Hash utilities and metadata
+    # Utilities and metadata
     # ---------------------
     def _compute_file_hash(self, file_path: Path) -> str:
         sha256_hash = hashlib.sha256()
@@ -157,21 +159,17 @@ class GraphRagManagerImpl(GraphRagManager):
                  content_hash=content_hash,
                  last_modified_at=int(stat.st_mtime * 1000),
                  file_size=stat.st_size)
-    def set_websocket_notifier(self, websocket_notifier) -> None:
-        self.websocket_notifier = websocket_notifier
-
-
 
     # ---------------------
     # Synchronization
     # ---------------------
-    def sync_project(self, project_id: str, force: bool = False) -> Dict[str, Any]:
-        logger.info("Starting sync project_id=%s force=%s", project_id, force)
+    def sync_project(self, reqeust_id: str, project_id: str, force_all: bool = False) -> Dict[str, Any]:
+        logger.info("Starting sync project_id=%s force=%s", project_id, force_all)
         project_entry = self._project_entries.get(project_id)
         if not project_entry:
             raise ValueError(f"Project {project_id} not found")
 
-        if force:
+        if force_all:
             self.handle_refresh_documents(project_id)
             return {"mode": "full", "ok": True}
 
@@ -204,17 +202,17 @@ class GraphRagManagerImpl(GraphRagManager):
         # Apply
         for d in changes["deleted"]:
             try:
-                self.handle_delete_path(project_id, Path(d))
+                self.handle_delete_path(project_id, d)
             except Exception:
                 logger.exception("Delete during sync failed for %s", d)
         for a in changes["added"]:
             try:
-                self.handle_add_path(project_id, Path(a))
+                self.handle_add_path(project_id, a)
             except Exception:
                 logger.exception("Add during sync failed for %s", a)
         for m in changes["modified"]:
             try:
-                self.handle_update_path(project_id, Path(m))
+                self.handle_update_path(project_id, m)
             except Exception:
                 logger.exception("Update during sync failed for %s", m)
 
@@ -238,7 +236,8 @@ class GraphRagManagerImpl(GraphRagManager):
         except Exception as e:
             logger.exception("Failed to create project %s: %s", project.project_id, str(e))
 
-    def delete_project(self, project_id: str) -> Dict[str, Any]:
+    def delete_project(self, request_id: str, project_id: str) -> None:
+        logger.info("Deleting project: %s, request_id: %s", project_id, request_id)
         try:
             entry = self._project_entries.get(project_id)
             if entry:
@@ -249,42 +248,108 @@ class GraphRagManagerImpl(GraphRagManager):
                     except Exception:
                         pass
                 self._project_entries.pop(project_id, None)
-            return self._project_mgr.delete_project(project_id)
+                self._project_mgr.delete_project(project_id)
         except Exception as e:
             logger.exception("Failed to delete project %s: %s", project_id, str(e))
             raise
 
-    def update_project(self, project_id: str, name: str | None = None, source_roots: List[str] | None = None, args: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    def update_project(self, request_id: str, project_id: str, args: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        logger.info("Updating project: %s, request_id: %s", project_id, request_id)
         try:
-            updated = self._project_mgr.update_project(project_id, name=name, source_roots=source_roots, args=args)
-            # Reload entry in memory
-            proj = self._project_mgr.get_project(project_id)
-            if proj:
-                entry = self._project_entries.get(project_id)
-                if entry is None:
-                    entry = _ProjectEntry(proj)
-                    entry.db_driver = GraphDatabase.driver(self._neo4j_url, auth=(self._username, self._password))
-                    self._project_entries[project_id] = entry
-                else:
-                    entry.project = proj
-                # Recreate observers for new roots
+            entry = self._project_entries.get(project_id)
+            if entry is None:
+                raise ValueError(f"Project {project_id} not found")
+
+            args = args or {}
+
+            # Determine incoming values with fallbacks
+            new_name: str = args.get("name", entry.project.name)
+            incoming_roots: List[str] = args.get("source_roots", entry.project.source_roots) or []
+
+            # Normalize paths to absolute posix strings for comparison
+            def normalize_many(paths: List[str]) -> List[str]:
+                normed: List[str] = []
+                for p in paths:
+                    try:
+                        normed.append(Path(p).expanduser().resolve().as_posix())
+                    except Exception:
+                        # If invalid, keep as-is to let downstream tasks handle/report
+                        normed.append(Path(p).as_posix())
+                return normed
+
+            current_norm = set(normalize_many(entry.project.source_roots))
+            incoming_norm = set(normalize_many(incoming_roots))
+
+            to_add = sorted(incoming_norm - current_norm)
+            to_remove = sorted(current_norm - incoming_norm)
+
+            # Persist changes via project manager
+            updates: Dict[str, Any] = {}
+            if new_name != entry.project.name:
+                updates["name"] = new_name
+            # Always persist the new set of roots if changed
+            if to_add or to_remove:
+                # Preserve original representation as provided in args for storage
+                updates["source_roots"] = incoming_roots
+
+            if updates:
+                # Call underlying manager without unexpected keywords in the signature
+                updated = self._project_mgr.update_project(project_id, updates)
+                proj = Project.from_dict(updated)
+
+                if proj is None:
+                    raise ValueError(f"Project {project_id} not found after update")
+                entry.project = proj
+            else:
+                updated = {"ok": True, "project_id": project_id}
+
+            # Handle FileTasks and observers for roots that changed
+            # Remove old observers for removed roots and schedule delete tasks
+            if to_remove:
+                # Stop observers pointing to removed roots
+                remaining_observers: List[Observer] = []
+                removed_set = set(to_remove)
                 for obs in entry.observers or []:
                     try:
-                        obs.stop(); obs.join(timeout=1)
+                        # watchdog.Observer doesn't expose watched paths directly; we stop/recreate below.
+                        obs.stop()
+                        obs.join(timeout=1)
                     except Exception as e:
-                        logger.warning(f"Failed to stop observer for project {project_id}: {e}")
+                        logger.warning("Failed to stop observer during removal: %s", str(e))
                 entry.observers = []
-                # Sync after update
-                self.sync_project(project_id, force=False)
+
+                for root_str in to_remove:
+                    # Create a FileTask to remove the path
+                    self._task_mgr.add_task(FileTask(request_id,
+                                                     project_id,
+                                                     root_str, root_str,
+                                                     True,
+                                                     FileEventType.PATH_DELETED,
+                                                     self.handle_delete_path,
+                                                     self._task_mgr))
+
+            # Add observers for newly added roots and schedule add tasks
+            if to_add:
+                for root_str in to_add:
+                    self._task_mgr.add_task(FileTask(request_id, project_id, root_str, action="add"))
+
+            # Recreate observers for the final set of roots
+            self._create_project_observers(project_entry=entry)
+
+            # Incremental sync after updates
+            self.sync_project(project_id, force=False)
+
             return updated
         except Exception as e:
             logger.exception("Failed to update project %s: %s", project_id, str(e))
             raise
 
-    def list_projects(self) -> List[Project]:
+    def list_projects(self, request_id: str) -> List[Project]:
+        logger.info(f"Listing projects for request {request_id}")
         return self._project_mgr.list_projects()
 
-    def get_project(self, project_id: str) -> Project | None:
+    def get_project(self, request_id: str, project_id: str) -> Project | None:
+        logger.info(f"Getting project {project_id} for request {request_id}")
         return self._project_mgr.get_project(project_id)
 
     def _create_project_observers(self, project_entry: _ProjectEntry) -> None:
@@ -310,9 +375,21 @@ class GraphRagManagerImpl(GraphRagManager):
                 project_entry.db_driver = GraphDatabase.driver(self._neo4j_url, auth=(self._username, self._password))
                 self._project_entries[project.project_id] = project_entry
                 # Perform incremental sync at startup
-                self.sync_project(project.project_id, force=False)
+                self.sync_project('Admin', project.project_id, force_all=True)
             except Exception as e:
                 logger.exception("Startup sync failed for %s, cause: %s", project.project_id, str(e))
+
+    # ---------------------
+    # Lifecycle API
+    # ---------------------
+    def stop(self) -> None:
+        for name, project_entry in self._project_entries:
+            for observer in project_entry.observers:
+                try:
+                    observer.stop()
+                    observer.join()
+                except Exception as e:
+                    logger.warning("Failed to stop observer: %s", str(e))
 
     # ---------------------
     # Query API
@@ -444,9 +521,10 @@ class GraphRagManagerImpl(GraphRagManager):
             logger.exception("Failed to refresh documents, request_id: %s", request_id)
             return {"ok": False, "error": str(e)}
 
-    def handle_add_path(self, project_id: str, path: Path) -> None:
-        logger.info("Entering GraphRagManager.ingest_file file_path=%s", path)
+    def handle_add_path(self, project_id: str, path_str: str) -> None:
+        logger.info("Entering GraphRagManager.ingest_file file_path=%s", path_str)
         project_entry = self._project_entries.get(project_id)
+        path = Path(path_str)
 
         try:
             if not path.exists():
@@ -470,23 +548,23 @@ class GraphRagManagerImpl(GraphRagManager):
             logger.exception("Ingestion failed for %s", path)
             raise e
 
-    def handle_update_path(self, project_id: str, path: Path) -> None:
+    def handle_update_path(self, project_id: str, path_str: str) -> None:
         try:
-            self.handle_delete_path(project_id, path)
-            self.handle_add_path(project_id, path)
+            self.handle_delete_path(project_id, path_str)
+            self.handle_add_path(project_id, path_str)
         except Exception as e:
-            logger.exception("Update failed for %s", path)
+            logger.exception("Update failed for %s", path_str)
             raise e
 
-    def handle_delete_path(self, project_id: str, path: Path) -> None:
+    def handle_delete_path(self, project_id: str, path_str: str) -> None:
         """
         If the path is a directory, delete every document under it from the store,
         along with all the relationships.  For each subdirectory, recursively call
         this method.
         """
-        logger.info("Entering GraphRagManager.delete_path path: %s", path)
+        logger.info("Entering GraphRagManager.delete_path path: %s", path_str)
         project_entry = self._project_entries.get(project_id)
-
+        path = Path(path_str)
         try:
             target = Path(path).expanduser().resolve()
         except Exception as e:
@@ -609,7 +687,3 @@ class GraphRagManagerImpl(GraphRagManager):
                 WHERE d2.content CONTAINS 'def ' + called_function
                 MERGE (d)-[:CALLS]->(d2)
             """)
-
-    @property
-    def task_mgr(self):
-        return self._task_mgr

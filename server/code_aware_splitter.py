@@ -4,6 +4,7 @@ import re
 from typing import Dict, Any, List, Tuple
 
 from haystack import component
+from haystack.dataclasses import Document
 
 logger = logging.getLogger(__name__)
 
@@ -22,23 +23,12 @@ class CodeAwareSplitter:
         language, path, symbol_scope (module/class/function/rule/tag), symbol_name, ext, chunk_index
     """
     def __init__(self) -> None:
-        super().__init__()
         logger.info("Entering CodeAwareSplitter.__init__")
 
     @component.output_types(documents=List["Document"])  # type: ignore[name-defined]
     def run(self, *, text: str, ext: str, path: str) -> Dict[str, Any]:
         logger.info("Entering CodeAwareSplitter.run ext=%s path=%s", ext, path)
         # Defer import to avoid hard dependency when Haystack is unavailable
-        try:
-            from haystack.dataclasses import Document  # type: ignore
-        except Exception:
-            # Minimal fallback structure compatible with our usage
-            class Document:  # type: ignore
-                def __init__(self, content: str, meta: Dict[str, Any], id: str | None = None) -> None:
-                    self.content = content
-                    self.meta = meta
-                    self.id = id
-
         chunks_with_meta = self.split(text=text, ext=ext, path=path)
         docs: List[Document] = []
         for idx, (chunk_text, base_meta) in enumerate(chunks_with_meta):
@@ -67,7 +57,8 @@ class CodeAwareSplitter:
         chunks: List[Tuple[str, Dict[str, Any]]] = []
         try:
             tree = ast.parse(text)
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Failed to parse Python code in {path}: {str(e)}")
             return self._split_generic(text=text, path=path, language="py")
         module_doc = ast.get_docstring(tree) or ""
         if module_doc.strip():

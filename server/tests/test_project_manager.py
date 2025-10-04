@@ -1,8 +1,10 @@
 """Unit tests for ProjectManagerImpl component."""
-import pytest
 import uuid
 from typing import Dict, Any, List, Optional
-from unittest.mock import Mock, MagicMock, patch
+from unittest.mock import patch
+
+import pytest
+
 from server.project_manager import ProjectManagerImpl
 from server.server_defines import Project
 
