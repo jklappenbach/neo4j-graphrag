@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 class FileTask(Task):
     def __init__(self, request_id: str, project_id: str, src_path: str, dest_path: str, is_directory: bool,
                  event_type: FileEventType,
-                 handler: Callable[[str, str, bool], None],
+                 handler: Callable[[str, str, str, str], None],
                  task_mgr: TaskManager) -> None:
         super().__init__(request_id, project_id, task_mgr)
         self._event_type = event_type
@@ -53,7 +53,7 @@ class FileTask(Task):
             if self._task_mgr:
                 self._task_mgr.start_task(self._request_id)
             if self._handler:
-                self._handler(self._event_type, self._src_path, self._dest_path, self._is_directory)
+                self._handler(self._request_id, self._project_id, self._src_path, self._dest_path)
             if self._task_mgr:
                 self._task_mgr.complete_task(self._request_id, {})
         except Exception as e:
@@ -253,7 +253,7 @@ class QueryTask(Task):
 class RefreshTask(Task):
     def __init__(self, request_id: str,
                  project_id: str,
-                 handler: Callable[[str], None],
+                 handler: Callable[[str], Dict[str, Any]],
                  task_mgr: TaskManager) -> None:
         super().__init__(request_id, project_id, task_mgr)
         self._handler = handler

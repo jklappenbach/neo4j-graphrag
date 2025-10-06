@@ -59,7 +59,7 @@ class GraphAwareRetriever:
                 # Get documents related through various relationships
                 result = session.run("""
                     MATCH (d:Document) WHERE d.id = $doc_id
-                    MATCH (d)-[r:IMPORTS|CALLS|DEFINES*1..2]-(related:Document)
+                    MATCH (d)-[r:imports|calls|defines|next|prev*1..2]-(related:Document)
                     WHERE related.id <> d.id
                     RETURN DISTINCT related.id as related_id, 
                            related.content as content,

@@ -162,7 +162,7 @@ def sync_project(project_id: str, req: SyncRequest):
     request_id = str(uuid.uuid4())
     try:
         global graph_rag_manager
-        res = graph_rag_manager.sync_project(request_id, project_id, force_all=req.force)
+        res = graph_rag_manager.handle_sync_project(request_id, project_id, force_all=req.force)
         return {"ok": True, "project_id": project_id, "sync": res}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

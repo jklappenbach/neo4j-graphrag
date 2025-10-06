@@ -47,14 +47,62 @@ class ProjectManagerImpl(ProjectManager):
     def create_project(self, project: Project) -> Dict[str, Any]:
         logger.info("create_project called: name=%s", project.name)
         try:
-            project_id = str(uuid.uuid4())
-
             # 1) Create per-project database by name
             with self.driver.session(database="system") as sys_sess:
                 sys_sess.run(
                     "CREATE DATABASE $db IF NOT EXISTS",
                     db=project.name,
                 )
+
+            # After DB creation, ensure required fulltext indexes exist in the project's database
+            try:
+                with self.driver.session(database=project.name) as proj_sess:
+                    index_statements = [
+                        # Full-text over content
+                        """
+                        CREATE FULLTEXT INDEX document_content_fti IF NOT EXISTS
+                        FOR (d:Document) ON EACH [d.content]
+                        """,
+                        # Full-text over calls (array of strings)
+                        """
+                        CREATE FULLTEXT INDEX document_calls_fti IF NOT EXISTS
+                        FOR (d:Document) ON EACH [d.calls]
+                        """,
+                        # Full-text over file_path
+                        """
+                        CREATE FULLTEXT INDEX document_file_path_fti IF NOT EXISTS
+                        FOR (d:Document) ON EACH [d.file_path]
+                        """,
+                        # Full-text over symbol_name (on Chunk nodes)
+                        """
+                        CREATE FULLTEXT INDEX document_symbol_name_fti IF NOT EXISTS
+                        FOR (d:Document) ON EACH [d.symbol_name]
+                        """,
+                        # Full-text over symbol_scope (on Chunk nodes)
+                        """
+                        CREATE FULLTEXT INDEX document_symbol_scope_fti IF NOT EXISTS
+                        FOR (d:Document) ON EACH [d.symbol_scope]
+                        """,
+                        # Create/ensure indexes for Document navigation fields
+                        """
+                        CREATE INDEX document_next_idx IF NOT EXISTS 
+                        FOR (d:Document) ON (d.next)
+                        """,
+                        # Create/ensure indexes for Document navigation fields
+                        """
+                        CREATE INDEX document_previous_idx IF NOT EXISTS
+                        FOR (d:Document) ON (d.previous)
+                        """
+                    ]
+                    for stmt in index_statements:
+                        try:
+                            proj_sess.run(stmt)
+                            logger.debug("Ensured index: %s", stmt.strip().splitlines()[0])
+                        except Exception as e:
+                            logger.warning("Failed creating index in project DB %s: %s", project.name, e)
+            except Exception as e:
+                logger.exception("Error ensuring full-text indexes for project %s: %s", project.name, e)
+                # Non-fatal; continue so project is at least created
 
             # 2) Insert metadata into catalog
             with self.driver.session(database=self.CATALOG_DB) as cat_sess:
@@ -66,13 +114,13 @@ class ProjectManagerImpl(ProjectManager):
                         source_roots: $source_roots
                     })
                     """,
-                    project_id=project_id,
+                    project_id=project.project_id,
                     name=project.name,
                     source_roots=list(project.source_roots or [])
                 )
 
             return {
-                "project_id": project_id,
+                "project_id": project.project_id,
                 "name": project.name,
                 "source_roots": project.source_roots
             }

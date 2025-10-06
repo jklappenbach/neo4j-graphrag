@@ -1,7 +1,6 @@
 import hashlib
 import logging
 import os
-import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
@@ -9,6 +8,15 @@ from typing import Any, Dict, Iterable, List
 import neo4j
 from haystack import tracing
 from haystack.components.converters import TextFileToDocument
+from haystack.components.converters import CSVToDocument
+from haystack.components.converters import DOCXToDocument
+from haystack.components.converters import HTMLToDocument
+from haystack.components.converters import JSONConverter
+from haystack.components.converters import MarkdownToDocument
+from haystack.components.converters import PyPDFToDocument
+from haystack.components.joiners import DocumentJoiner
+from haystack.components.preprocessors import DocumentSplitter
+
 from haystack.components.routers import FileTypeRouter
 from haystack.components.writers import DocumentWriter
 from haystack.core.pipeline import Pipeline
@@ -20,9 +28,12 @@ from neo4j import GraphDatabase
 from neo4j_haystack import Neo4jDocumentStore
 from watchdog.observers import Observer
 
-from server.code_aware_splitter import CodeAwareSplitter
-from server.code_relationship_extractor import CodeRelationshipExtractor
-from server.graph_document_expander import GraphAwareRetriever
+from server.pipeline.code_relationship_extractor import CodeRelationshipExtractor
+from server.pipeline.graph_document_expander import GraphAwareRetriever
+from server.pipeline.css_splitter import CssSplitter
+from server.pipeline.html_splitter import HtmlSplitter
+from server.pipeline.javascript_splitter import JavascriptSplitter
+from server.pipeline.python_splitter import PythonSplitter
 from server.project_manager import ProjectManagerImpl
 from server.server_defines import GraphRagManager, Project, TaskManager, FileEventType
 from server.task_manager import RefreshTask, QueryTask, ListDocumentsTask, FileTask
@@ -53,17 +64,36 @@ class _ProjectEntry:
     document_store: Neo4jDocumentStore
     document_embedder: OllamaDocumentEmbedder
     text_converter: TextFileToDocument
+    csv_converter: CSVToDocument
+    docx_converter: DOCXToDocument
+    html_converter: HTMLToDocument
+    json_converter: JSONConverter
+    pdf_converter: PyPDFToDocument
+    md_converter: MarkdownToDocument
+    text_splitter: DocumentSplitter
+    css_splitter: CssSplitter
+    html_splitter: HtmlSplitter
+    md_splitter: DocumentSplitter
+    js_splitter: JavascriptSplitter
+    python_splitter: PythonSplitter
+
     rel_extractor: CodeRelationshipExtractor
     retriever: GraphAwareRetriever
-    doc_splitter: CodeAwareSplitter
     doc_writer: DocumentWriter
     ingestion_pipeline: Pipeline
 
     def __init__(self, project: Project) -> None:
-        url = os.environ.get('NEO4J_URL', 'bolt://localhost:7687')
-        username = os.environ.get('NEO4j_USERNAME', 'neo4j')
-        password = os.environ.get('NEO4J_PASSWORD', 'your_neo4j_password')
         try:
+            url = os.environ.get('NEO4J_URL', 'bolt://localhost:7687')
+            username = os.environ.get('NEO4j_USERNAME', 'neo4j')
+            password = os.environ.get('NEO4J_PASSWORD', 'your_neo4j_password')
+            self.default_embedder = os.environ.get('GRAPH_RAG_DEFAULT_EMBEDDER',
+                                                   'hf.co/nomic-ai/nomic-embed-code-GGUF:Q4_K_M')
+            self.embedder_name = self.default_embedder if project.embedder_model_name == 'default' else project.embedder_model_name
+            self.default_llm = os.environ.get('GRAPH_RAG_DEFAULT_LLM',
+                                              'hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q5_K_M')
+            self.llm_name = self.default_llm if project.llm_model_name == 'default' else project.llm_model_name
+
             self.project = project
             # Initialize Document Store and Embedder [1.2.7, 1.5.3]
             self.document_store = Neo4jDocumentStore(
@@ -75,31 +105,81 @@ class _ProjectEntry:
             )
 
             self.document_embedder = OllamaDocumentEmbedder(
-                model=self.project.embedder_model_name,
+                model=self.embedder_name,
                 url="http://localhost:11434"
             )
 
             # Define the ingestion pipeline
-            self.file_type_router = FileTypeRouter()
-            self.text_converter = TextFileToDocument()
+            self.file_type_router = FileTypeRouter(mime_types=["text/plain", "text/css", "text/html",
+                                                               "text/javascript", "text/x-python", "application/pdf",
+                                                               "text/markdown", "application/json"])
+            self.text_converter = TextFileToDocument(store_full_path=True)
+            self.python_converter = TextFileToDocument(store_full_path=True)
+            self.js_converter = TextFileToDocument(store_full_path=True)
+            self.css_converter = TextFileToDocument(store_full_path=True)
+            self.html_converter = HTMLToDocument(store_full_path=True)
+            self.md_converter = MarkdownToDocument(store_full_path=True)
+            self.pdf_converter = PyPDFToDocument(store_full_path=True)
+            self.css_splitter = CssSplitter()
+            self.js_splitter = JavascriptSplitter()
+            self.md_splitter = DocumentSplitter()
+            self.text_splitter = DocumentSplitter()
+            self.css_splitter = CssSplitter()
+            self.html_splitter = HtmlSplitter()
+            self.js_splitter = JavascriptSplitter()
+            self.pdf_splitter = DocumentSplitter()
+            self.python_splitter = PythonSplitter()
             self.rel_extractor = CodeRelationshipExtractor()
-            self.doc_splitter = CodeAwareSplitter()
+            self.document_joiner = DocumentJoiner()
+
             self.doc_writer = DocumentWriter(document_store=self.document_store,
                                             policy=DuplicatePolicy.OVERWRITE)
 
             # Create the pipeline
             self.ingestion_pipeline = Pipeline()
-            self.ingestion_pipeline.add_component(instance=self.file_type_router, name="file_type_router")
-            self.ingestion_pipeline.add_component(instance=self.text_converter, name="converter")
-            self.ingestion_pipeline.add_component("splitter", self.doc_splitter)
+            self.ingestion_pipeline.add_component("file_type_router", self.file_type_router)
+            self.ingestion_pipeline.add_component("text_converter",  self.text_converter)
+            self.ingestion_pipeline.add_component("python_converter", self.python_converter)
+            self.ingestion_pipeline.add_component("js_converter", self.js_converter)
+            self.ingestion_pipeline.add_component("md_converter", self.md_converter)
+            self.ingestion_pipeline.add_component("css_converter", self.css_converter)
+            self.ingestion_pipeline.add_component("pdf_converter", self.pdf_converter)
+            self.ingestion_pipeline.add_component("html_converter", self.html_converter)
+            self.ingestion_pipeline.add_component("text_splitter", self.text_splitter)
+            self.ingestion_pipeline.add_component("md_splitter", self.md_splitter)
+            self.ingestion_pipeline.add_component("pdf_splitter", self.pdf_splitter)
+            self.ingestion_pipeline.add_component("css_splitter", self.css_splitter)
+            self.ingestion_pipeline.add_component("html_splitter", self.html_splitter)
+            self.ingestion_pipeline.add_component("js_splitter", self.js_splitter)
+            self.ingestion_pipeline.add_component("python_splitter", self.python_splitter)
             self.ingestion_pipeline.add_component("extractor", self.rel_extractor)
+            self.ingestion_pipeline.add_component("joiner", self.document_joiner)
             self.ingestion_pipeline.add_component("embedder", self.document_embedder)
             self.ingestion_pipeline.add_component("writer", self.doc_writer)
 
             # Link the components
-            self.ingestion_pipeline.connect("converter.documents", "splitter.documents")
-            self.ingestion_pipeline.connect("splitter.documents", "extractor.documents")
-            self.ingestion_pipeline.connect("extractor.documents", "embedder.documents")
+            self.ingestion_pipeline.connect("file_type_router.text/plain", "text_converter.sources")
+            self.ingestion_pipeline.connect("file_type_router.text/markdown", "md_converter.sources")
+            self.ingestion_pipeline.connect("file_type_router.application/pdf", "pdf_converter.sources")
+            self.ingestion_pipeline.connect("file_type_router.text/x-python", "python_converter.sources")
+            self.ingestion_pipeline.connect("file_type_router.text/css", "css_converter.sources")
+            self.ingestion_pipeline.connect("file_type_router.text/javascript", "js_converter.sources")
+            self.ingestion_pipeline.connect("file_type_router.text/html", "html_converter.sources")
+
+            self.ingestion_pipeline.connect("text_converter.documents", "text_splitter.documents")
+            self.ingestion_pipeline.connect("md_converter.documents", "md_splitter.documents")
+            self.ingestion_pipeline.connect("pdf_converter.documents", "pdf_splitter.documents")
+            self.ingestion_pipeline.connect("python_converter.documents", "python_splitter.documents")
+            self.ingestion_pipeline.connect("css_converter.documents", "css_splitter.documents")
+            self.ingestion_pipeline.connect("html_converter.documents", "html_splitter.documents")
+            self.ingestion_pipeline.connect("js_converter.documents", "js_splitter.documents")
+            self.ingestion_pipeline.connect("python_splitter.documents", "extractor.documents")
+            self.ingestion_pipeline.connect("extractor.documents", "joiner.documents")
+            self.ingestion_pipeline.connect("text_splitter.documents", "joiner.documents")
+            self.ingestion_pipeline.connect("css_splitter.documents", "joiner.documents")
+            self.ingestion_pipeline.connect("html_splitter.documents", "joiner.documents")
+            self.ingestion_pipeline.connect("js_splitter.documents", "joiner.documents")
+            self.ingestion_pipeline.connect("joiner.documents", "embedder.documents")
             self.ingestion_pipeline.connect("embedder.documents", "writer.documents")
         except Exception as e:
             logger.exception("Error initializing project pipelines %s", str(e))
@@ -164,74 +244,16 @@ class GraphRagManagerImpl(GraphRagManager):
                  file_size=stat.st_size)
 
     # ---------------------
-    # Synchronization
-    # ---------------------
-    def sync_project(self, reqeust_id: str, project_id: str, force_all: bool = False) -> Dict[str, Any]:
-        logger.info("Starting sync project_id=%s force=%s", project_id, force_all)
-        project_entry = self._project_entries.get(project_id)
-        if not project_entry:
-            raise ValueError(f"Project {project_id} not found")
-
-        if force_all:
-            self.handle_refresh_documents(project_id)
-            return {"mode": "full", "ok": True}
-
-        changes = {"added": [], "modified": [], "deleted": [], "unchanged": 0}
-        tracked = self._get_tracked_files_with_hashes(project_id)
-
-        current: Dict[str, str] = {}
-        for root in project_entry.project.source_roots:
-            root_path = Path(root).expanduser().resolve()
-            if not root_path.exists():
-                continue
-            for fp in self._iter_code_files(root_path):
-                try:
-                    current[fp.as_posix()] = self._compute_file_hash(fp)
-                except Exception as e:
-                    logger.exception("Hash failed for %s, cause: %s", fp, str(e))
-
-        for path_str, h in current.items():
-            if path_str not in tracked:
-                changes["added"].append(path_str)
-            elif tracked[path_str] != h:
-                changes["modified"].append(path_str)
-            else:
-                changes["unchanged"] += 1
-
-        for path_str in tracked.keys():
-            if path_str not in current:
-                changes["deleted"].append(path_str)
-
-        # Apply
-        for d in changes["deleted"]:
-            try:
-                self.handle_delete_path(project_id, d)
-            except Exception:
-                logger.exception("Delete during sync failed for %s", d)
-        for a in changes["added"]:
-            try:
-                self.handle_add_path(project_id, a)
-            except Exception:
-                logger.exception("Add during sync failed for %s", a)
-        for m in changes["modified"]:
-            try:
-                self.handle_update_path(project_id, m)
-            except Exception:
-                logger.exception("Update during sync failed for %s", m)
-
-        return {"mode": "incremental", **{k: (len(v) if isinstance(v, list) else v) for k, v in changes.items()}}
-
-    # ---------------------
     # Projects API
     # ---------------------
     def create_project(self, project: Project) -> None:
         if self._project_entries.get(project.project_id) is not None:
             raise Exception('Project already exists')
         try:
+            self._project_mgr.create_project(project)
             project_entry = _ProjectEntry(project)
             self._project_entries[project.project_id] = project_entry
             project_entry.db_driver = GraphDatabase.driver(self._neo4j_url, auth=(self._username, self._password))
-            self._project_mgr.create_project(project)
             self._create_project_observers(project_entry)
             for path_str in project.source_roots:
                 path = Path(path_str)
@@ -334,13 +356,17 @@ class GraphRagManagerImpl(GraphRagManager):
             # Add observers for newly added roots and schedule add tasks
             if to_add:
                 for root_str in to_add:
-                    self._task_mgr.add_task(FileTask(request_id, project_id, root_str, action="add"))
+                    self._task_mgr.add_task(FileTask(request_id,
+                                                     project_id,
+                                                     root_str,
+                                                     "",
+                                                     True,
+                                                     FileEventType.PATH_CREATED,
+                                                     self.handle_add_path,
+                                                     self._task_mgr))
 
             # Recreate observers for the final set of roots
             self._create_project_observers(project_entry=entry)
-
-            # Incremental sync after updates
-            self.sync_project(project_id, force=False)
 
             return updated
         except Exception as e:
@@ -378,7 +404,7 @@ class GraphRagManagerImpl(GraphRagManager):
                 project_entry.db_driver = GraphDatabase.driver(self._neo4j_url, auth=(self._username, self._password))
                 self._project_entries[project.project_id] = project_entry
                 # Perform incremental sync at startup
-                self.sync_project('Admin', project.project_id, force_all=True)
+                self.handle_sync_project(project.project_id)
             except Exception as e:
                 logger.exception("Startup sync failed for %s, cause: %s", project.project_id, str(e))
 
@@ -518,22 +544,24 @@ class GraphRagManagerImpl(GraphRagManager):
     def refresh_documents(self, request_id: str, project_id: str) -> Dict[str, Any]:
         logger.info("Entering GraphRagManager.clear_documents, request_id: %s", request_id)
         try:
-            self._task_mgr.add_task(RefreshTask(request_id, project_id, self.handle_refresh_documents, self._task_mgr))
+            self._task_mgr.add_task(RefreshTask(request_id, project_id, self.handle_sync_project, self._task_mgr))
             return {"ok": True, "request_id": request_id}
         except Exception as e:
             logger.exception("Failed to refresh documents, request_id: %s", request_id)
             return {"ok": False, "error": str(e)}
 
-    def handle_add_path(self, project_id: str, path_str: str) -> None:
-        logger.info("Entering GraphRagManager.ingest_file file_path=%s", path_str)
-        project_entry = self._project_entries.get(project_id)
-        path = Path(path_str)
+    def handle_add_path(self, request_id: str, project_id: str, src_path_str: str, dest_path_str: str) -> None:
+        logger.info("Entering GraphRagManager.ingest_file file_path=%s", src_path_str)
+        project_entry: _ProjectEntry = self._project_entries.get(project_id)
+        path = Path(src_path_str)
 
         try:
             if not path.exists():
                 return
             code_files: List[Path] = []
             if path.is_dir():
+                if path.name.startswith('.'):
+                    return
                 code_files.extend(list(self._iter_code_files(path)))
             else:
                 code_files.append(path)
@@ -541,7 +569,8 @@ class GraphRagManagerImpl(GraphRagManager):
             if len(code_files) == 0:
                 return
 
-            project_entry.ingestion_pipeline.run({"converter": {"sources": code_files}})
+            project_entry.ingestion_pipeline.run({"file_type_router": {"sources": code_files}})
+            logger.info("Completed ingestion of code files.")
             self._create_doc_relationships()
             for fp in code_files:
                 ch = self._compute_file_hash(fp)
@@ -551,23 +580,23 @@ class GraphRagManagerImpl(GraphRagManager):
             logger.exception("Ingestion failed for %s", path)
             raise e
 
-    def handle_update_path(self, project_id: str, path_str: str) -> None:
+    def handle_update_path(self, request_id: str, project_id: str, src_path_str: str, dest_path_str: str) -> None:
         try:
-            self.handle_delete_path(project_id, path_str)
-            self.handle_add_path(project_id, path_str)
+            self.handle_delete_path(project_id, src_path_str)
+            self.handle_add_path(project_id, dest_path_str)
         except Exception as e:
-            logger.exception("Update failed for %s", path_str)
+            logger.exception("Update failed for %s", src_path_str)
             raise e
 
-    def handle_delete_path(self, project_id: str, path_str: str) -> None:
+    def handle_delete_path(self, request_id: str, project_id: str, src_path_str: str, dest_path_str: str) -> None:
         """
         If the path is a directory, delete every document under it from the store,
         along with all the relationships.  For each subdirectory, recursively call
         this method.
         """
-        logger.info("Entering GraphRagManager.delete_path path: %s", path_str)
+        logger.info("Entering GraphRagManager.delete_path path: %s", src_path_str)
         project_entry = self._project_entries.get(project_id)
-        path = Path(path_str)
+        path = Path(src_path_str)
         try:
             target = Path(path).expanduser().resolve()
         except Exception as e:
@@ -590,12 +619,11 @@ class GraphRagManagerImpl(GraphRagManager):
             # Remove relationships before removing the node
             try:
                 with project_entry.db_driver.session() as s:
-                    # Delete Chunk nodes contained by the Document, then the Document itself.
+                    # Delete the Document and any relationships it participates in.
                     s.run(
                         """
                         MATCH (d:Document {file_path: $path})
-                        OPTIONAL MATCH (d)-[:CONTAINS]->(c:Chunk)
-                        DETACH DELETE c, d
+                        DETACH DELETE d
                         """,
                         {"path": file_path_str},
                     )
@@ -603,12 +631,69 @@ class GraphRagManagerImpl(GraphRagManager):
                 logger.exception("Failed deleting document graph for %s", file_path_str)
                 raise e
 
-            # Then remove the node itself
+            # Then remove the vector/record from the document store
             try:
-                project_entry.document_store.delete_documents([file_path_str])
+                doc_id = self._get_document_id_by_path(project_id, file_path_str)
+                if doc_id:
+                    project_entry.document_store.delete_documents([doc_id])
             except Exception as e:
                 logger.debug("Document store deletion attempt skipped/failed for %s", file_path_str)
                 raise e
+
+    def handle_sync_project(self, project_id: str) -> Dict[str, Any]:
+        logger.info("Starting sync project_id=%s", project_id)
+        project_entry = self._project_entries.get(project_id)
+        if not project_entry:
+            raise ValueError(f"Project {project_id} not found")
+
+        # if force_all:
+        #     self.handle_refresh_documents(project_id)
+        #     return {"mode": "full", "ok": True}
+
+        changes = {"added": [], "modified": [], "deleted": [], "unchanged": 0}
+        tracked = self._get_tracked_files_with_hashes(project_id)
+
+        current: Dict[str, str] = {}
+        for root in project_entry.project.source_roots:
+            root_path = Path(root).expanduser().resolve()
+            if not root_path.exists():
+                continue
+            for fp in self._iter_code_files(root_path):
+                try:
+                    current[fp.as_posix()] = self._compute_file_hash(fp)
+                except Exception as e:
+                    logger.exception("Hash failed for %s, cause: %s", fp, str(e))
+
+        for path_str, h in current.items():
+            if path_str not in tracked:
+                changes["added"].append(path_str)
+            elif tracked[path_str] != h:
+                changes["modified"].append(path_str)
+            else:
+                changes["unchanged"] += 1
+
+        for path_str in tracked.keys():
+            if path_str not in current:
+                changes["deleted"].append(path_str)
+
+        # Apply
+        for d in changes["deleted"]:
+            try:
+                self.handle_delete_path(project_id, d)
+            except Exception:
+                logger.exception("Delete during sync failed for %s", d)
+        for a in changes["added"]:
+            try:
+                self.handle_add_path(project_id, a)
+            except Exception:
+                logger.exception("Add during sync failed for %s", a)
+        for m in changes["modified"]:
+            try:
+                self.handle_update_path(project_id, m)
+            except Exception:
+                logger.exception("Update during sync failed for %s", m)
+
+        return {"mode": "incremental", **{k: (len(v) if isinstance(v, list) else v) for k, v in changes.items()}}
 
     def handle_list_documents(self, project_id: str) -> Dict[str, Any]:
         entry = self._project_entries.get(project_id)
@@ -647,20 +732,6 @@ class GraphRagManagerImpl(GraphRagManager):
             logger.exception("Failed listing documents", e)
             raise e
 
-    def handle_refresh_documents(self, project_id: str) -> None:
-        logger.info("Refreshing all documents for project %s", project_id)
-        entry = self._project_entries.get(project_id)
-        if not entry:
-            raise ValueError(f"Project {project_id} not found")
-        for root in entry.project.source_roots:
-            rp = Path(root).expanduser().resolve()
-            if rp.exists():
-                self.handle_delete_path(project_id, rp)
-        for root in entry.project.source_roots:
-            rp = Path(root).expanduser().resolve()
-            if rp.exists():
-                self.handle_add_path(project_id, rp)
-
     # ---------------------
     # Helpers
     # ---------------------
@@ -681,12 +752,48 @@ class GraphRagManagerImpl(GraphRagManager):
                 MERGE (d)-[:IMPORTS]->(d2)
             """)
 
-            # Create CALLS relationships
+            # Create CALLS relationships:
+            # For each function name in d.calls, connect to any Document whose symbol_name contains that function.
             session.run("""
                 MATCH (d:Document)
                 WHERE d.calls IS NOT NULL
                 UNWIND d.calls AS called_function
                 MATCH (d2:Document)
-                WHERE d2.content CONTAINS 'def ' + called_function
+                WHERE d2.symbol_name IS NOT NULL AND d2.symbol_name CONTAINS called_function
                 MERGE (d)-[:CALLS]->(d2)
             """)
+
+            # Create NEXT/PREV relationships between chunked documents when metadata contains navigation ids
+            session.run("""
+                MATCH (d:Document)
+                WHERE exists(d.next)
+                MATCH (n:Document {id: d.next})
+                MERGE (d)-[:NEXT]->(n)
+            """)
+            session.run("""
+                MATCH (d:Document)
+                WHERE exists(d.previous)
+                MATCH (p:Document {id: d.previous})
+                MERGE (d)-[:PREVIOUS]->(p)
+            """)
+
+    def _get_document_id_by_path(self, project_id: str, file_path: str) -> str | None:
+        """
+        Helper: Return the Document node id for a given file path within a project database.
+        """
+        entry = self._project_entries.get(project_id)
+        if not entry:
+            raise ValueError(f"Project {project_id} not found")
+        # Normalize to absolute posix path to match stored file_path
+        path_str = Path(file_path).expanduser().resolve().as_posix()
+        try:
+            with entry.db_driver.session(database=entry.project.name) as session:
+                res = session.run("""
+                    MATCH (d:Document {file_path: $path})
+                    RETURN d.id AS id
+                """, path=path_str)
+                rec = res.single()
+                return rec["id"] if rec and rec.get("id") is not None else None
+        except Exception as e:
+            logger.exception("Failed to fetch document id for path=%s in project=%s: %s", path_str, project_id, str(e))
+            raise

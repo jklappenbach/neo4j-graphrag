@@ -36,7 +36,7 @@ class Project:
         self._name = name
         self._source_roots = source_roots
         self._embedder_model_name = args.get('embedder_model_name', 'default')
-        self.llm_model_name = args.get('llm_model_name', 'default')
+        self._llm_model_name = args.get('llm_model_name', 'default')
         self._query_temperature = args.get('query_temperature', 1.0)
 
     @classmethod
@@ -55,12 +55,6 @@ class Project:
     def name(self) -> str:
         return self._name
 
-    @name.setter
-    def name(self, value: str) -> None:
-        if not isinstance(value, str) or not value.strip():
-            raise ValueError("Project name must be a non-empty string")
-        self._name = value.strip()
-
     @property
     def project_id(self) -> str:
         return self._project_id
@@ -69,15 +63,46 @@ class Project:
     def source_roots(self) -> List[str]:
         return self._source_roots
 
+    @property
+    def embedder_model_name(self) -> str:
+        return self._embedder_model_name
+    @property
+    def llm_model_name(self) -> str:
+        return self._llm_model_name
+
+    @property
+    def query_temperature(self) -> float:
+        return self._query_temperature
+
+    @name.setter
+    def name(self, value: str) -> None:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("Project name must be a non-empty string")
+        self._name = value.strip()
+
     @source_roots.setter
     def source_roots(self, value: List[str]) -> None:
         if not isinstance(value, List):
             raise ValueError("Project source_roots must be a List[str]")
         self._source_roots = value
 
-    @property
-    def embedder_model_name(self):
-        return self._embedder_model_name
+    @embedder_model_name.setter
+    def embedder_model_name(self, value: str) -> None:
+        if not isinstance(value, str):
+            raise ValueError("Project embedder_model_name must be a str")
+        self._embedder_model_name = value
+
+    @llm_model_name.setter
+    def llm_model_name(self, value: str) -> None:
+        if not isinstance(value, str):
+            raise ValueError("Project llm_model_name must be a str")
+        self._llm_model_name = value
+
+    @query_temperature.setter
+    def query_temperature(self, value: float) -> None:
+        if not isinstance(value, float):
+            raise ValueError("Project query_temperature must be a float")
+        self._query_temperature = value
 
     def to_dict(self) -> Dict[str, Any]:
         return self.__dict__
@@ -130,6 +155,7 @@ class Task(ABC):
     def __init__(self, request_id: str, project_id: str, task_mgr: Optional[TaskManager] = None) -> None:
         """Initialize a new task for processing."""
         self._request_id = request_id
+        self._project_id = project_id
         self._task_mgr = task_mgr
         self._task_status = TaskStatus.QUEUED
         self._created_at = time.time()
@@ -147,7 +173,7 @@ class Task(ABC):
         return self._request_id
 
     @classmethod
-    def from_record(cls, record: Record) -> 'Task':
+    def from_record(cls, record: Record) -> Task:
         """Create a Task instance from a database record."""
         # Create instance with minimal args first
         instance = cls.__new__(cls)  # Create without calling __init__
@@ -298,7 +324,7 @@ class GraphRagManager(ABC):
         pass
 
     @abstractmethod
-    def sync_project(self, reqeust_id: str, project_id: str, force_all: bool = False) -> Dict[str, Any]:
+    def handle_sync_project(self, project_id: str) -> Dict[str, Any]:
         pass
 
     @abstractmethod
@@ -310,23 +336,19 @@ class GraphRagManager(ABC):
         pass
 
     @abstractmethod
-    def handle_add_path(self, project_id: str, path_str: str) -> None:
+    def handle_add_path(self, request_id: str, project_id: str, src_path_str: str, dest_path_str: str) -> None:
         pass
 
     @abstractmethod
-    def handle_update_path(self, project_id: str, path_str: str) -> None:
+    def handle_update_path(self, request_id: str, project_id: str, src_path_str: str, dest_path_str: str) -> None:
         pass
 
     @abstractmethod
-    def handle_delete_path(self, project_id: str, path_str: str) -> None:
+    def handle_delete_path(self, request_id: str, project_id: str, src_path_str: str, dest_path_str: str) -> None:
         pass
 
     @abstractmethod
     def handle_list_documents(self, project_id: str) -> Dict[str, Any]:
-        pass
-
-    @abstractmethod
-    def handle_refresh_documents(self,  project_id: str) -> None:
         pass
 
     @abstractmethod

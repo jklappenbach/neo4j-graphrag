@@ -316,7 +316,7 @@ def test_handle_query_invalid_project_raises(graph_rag_manager):
 def test_sync_project_invalid_project_raises(graph_rag_manager):
     """Test sync_project with invalid project raises exception."""
     with pytest.raises(ValueError, match="not found"):
-        graph_rag_manager.sync_project("invalid-id", force=False)
+        graph_rag_manager.handle_sync_project("invalid-id", force=False)
 
 
 def test_handle_list_documents_invalid_project_raises(graph_rag_manager):
