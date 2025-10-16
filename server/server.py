@@ -11,7 +11,6 @@ import neo4j
 from fastapi import Body, FastAPI, WebSocket, HTTPException
 from fastapi import Request
 from fastapi.responses import HTMLResponse
-from flask import abort
 from neo4j import GraphDatabase
 
 from client.client_defines import ProjectCreate, SyncRequest
