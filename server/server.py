@@ -4,14 +4,14 @@ import os
 import platform
 import uuid
 from contextlib import asynccontextmanager
+from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 from typing import Any, Dict, List
-
 import neo4j
 from fastapi import Body, FastAPI, WebSocket, HTTPException
 from fastapi import Request
-from fastapi.responses import HTMLResponse
 from neo4j import GraphDatabase
+from starlette.responses import HTMLResponse
 
 from client.client_defines import ProjectCreate, SyncRequest
 from server.graph_rag_manager import GraphRagManagerImpl
@@ -220,9 +220,9 @@ def _list_dir(path: str, include_files: bool, page: int, page_size: int):
                     "type": "dir" if is_dir else ("file" if is_file else "other"),
                 })
     except FileNotFoundError:
-        abort(404, description="Path not found")
+       raise HTTPException(404, detail="Path not found")
     except PermissionError:
-        abort(403, description="Permission denied")
+        raise HTTPException(403, detail="Permission denied")
 
     # Sort: dirs first then files, case-insensitive by name
     entries.sort(key=lambda x: (0 if x["type"] == "dir" else 1, x["name"].lower()))
@@ -319,6 +319,45 @@ def api_fs_list(path: str, include_files: bool, page: int = 1, page_size: int = 
     """List directory contents"""
     norm = _normalize_path(path)
     return _list_dir(norm, include_files, page, page_size)
+
+
+def _configure_logging() -> None:
+    # Directory from env or default
+    log_dir = os.environ.get("LOGGING_PATH", "./logs/")
+    os.makedirs(log_dir, exist_ok=True)
+
+    log_path = os.path.join(log_dir, "server.log")
+
+    # Root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+
+    # Remove pre-existing handlers to avoid duplication when reloading
+    for h in list(root_logger.handlers):
+        root_logger.removeHandler(h)
+
+    # Console handler (kept for local dev)
+    console = logging.StreamHandler()
+    console.setLevel(logging.INFO)
+    console.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s"))
+    root_logger.addHandler(console)
+
+    # Daily rolling file handler, keep 7 days
+    file_handler = TimedRotatingFileHandler(
+        filename=log_path,
+        when="D",
+        interval=1,
+        backupCount=7,
+        encoding="utf-8",
+        utc=False,
+    )
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s"))
+    root_logger.addHandler(file_handler)
+
+
+# Ensure logging is configured as early as possible
+_configure_logging()
 
 # Optional: run with `python -m server.server`
 if __name__ == "__main__":

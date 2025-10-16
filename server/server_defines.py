@@ -31,10 +31,11 @@ class FileEventType(Enum):
 
 class Project:
     """A project represents a collection of source roots, which are recursively scanned for documents."""
-    def __init__(self, name: str, source_roots: List[str], args: Dict[str, Any] = {}):
+    def __init__(self, name: str, source_roots: List[str], args: Dict[str, Any] = None):
         self._project_id = str(uuid.uuid4())
         self._name = name
         self._source_roots = source_roots
+        args = {} | args
         self._embedder_model_name = args.get('embedder_model_name', 'default')
         self._llm_model_name = args.get('llm_model_name', 'default')
         self._query_temperature = args.get('query_temperature', 1.0)
@@ -54,6 +55,10 @@ class Project:
     @property
     def name(self) -> str:
         return self._name
+
+    @name.setter
+    def name(self, value: str) -> None:
+        self._name = value
 
     @property
     def project_id(self) -> str:
@@ -106,6 +111,11 @@ class Project:
 
     def to_dict(self) -> Dict[str, Any]:
         return self.__dict__
+
+    @project_id.setter
+    def project_id(self, value):
+        self._project_id = value
+
 
 class TaskManager(ABC):
     """Abstract base class for status tracking implementations."""
@@ -173,7 +183,7 @@ class Task(ABC):
         return self._request_id
 
     @classmethod
-    def from_record(cls, record: Record) -> Task:
+    def from_record(cls, record: Record):
         """Create a Task instance from a database record."""
         # Create instance with minimal args first
         instance = cls.__new__(cls)  # Create without calling __init__
@@ -324,7 +334,7 @@ class GraphRagManager(ABC):
         pass
 
     @abstractmethod
-    def handle_sync_project(self, project_id: str) -> Dict[str, Any]:
+    def handle_sync_project(self, request_id: str, project_id: str) -> Dict[str, Any]:
         pass
 
     @abstractmethod
@@ -336,15 +346,15 @@ class GraphRagManager(ABC):
         pass
 
     @abstractmethod
-    def handle_add_path(self, request_id: str, project_id: str, src_path_str: str, dest_path_str: str) -> None:
+    def handle_add_path(self, request_id: str, project_id: str, src_path_str: str, dest_path_str: str = None) -> None:
         pass
 
     @abstractmethod
-    def handle_update_path(self, request_id: str, project_id: str, src_path_str: str, dest_path_str: str) -> None:
+    def handle_update_path(self, request_id: str, project_id: str, src_path_str: str, dest_path_str: str = None) -> None:
         pass
 
     @abstractmethod
-    def handle_delete_path(self, request_id: str, project_id: str, src_path_str: str, dest_path_str: str) -> None:
+    def handle_delete_path(self, request_id: str, project_id: str, src_path_str: str, dest_path_str: str = None) -> None:
         pass
 
     @abstractmethod
@@ -364,26 +374,23 @@ class ProjectManager(ABC):
     """Abstract interface for CRUD operations on Project instances backed by Neo4j."""
 
     @abstractmethod
-    def create_project(self, project: Project) -> Dict[str, Any]:
+    def create_project(self, project: Project) -> Project:
         """Create a new project record and associated Neo4j database."""
         raise NotImplementedError
 
     @abstractmethod
-    def get_project(self, project_id: str) -> Optional[Dict[str, Any]]:
+    def get_project(self, project_id: str) -> Optional[Project]:
         """Retrieve a project by ID."""
         raise NotImplementedError
 
     @abstractmethod
-    def list_projects(self) -> List[Dict[str, Any]]:
+    def list_projects(self) -> List[Project]:
         """List all projects."""
         raise NotImplementedError
 
     @abstractmethod
-    def update_project(
-        self,
-        project_id: str,
-        args: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+    def update_project(self, request_id: str, project_id: str, args: Dict[str, Any] = None) -> Project:
+
         """Update fields of a project."""
         raise NotImplementedError
 

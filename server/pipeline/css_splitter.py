@@ -62,9 +62,9 @@ class CssSplitter:
             selector = m.group(1).strip()
             block = m.group(0)
             if block.strip():
-                chunks.append((block, {"language": "css", "path": path, "symbol_scope": "rule", "symbol_name": selector}))
+                chunks.append((block, {"language": "css", "path": path, "symbol_type": "rule", "symbol_name": selector}))
             last_end = m.end()
         tail = css[last_end:].strip()
         if tail:
-            chunks.append((tail, {"language": "css", "path": path, "symbol_scope": "module", "symbol_name": ""}))
+            chunks.append((tail, {"language": "css", "path": path, "symbol_type": "module", "symbol_name": ""}))
         return chunks

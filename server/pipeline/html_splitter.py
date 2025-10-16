@@ -61,8 +61,8 @@ class HtmlSplitter:
             buf += part
             if re.match(r"(?i)</(html|head|body|section|article|div|main|nav|footer)\b", part or ""):
                 if buf.strip():
-                    chunks.append((buf, {"language": "html", "path": path, "symbol_scope": "tag", "symbol_name": ""}))
+                    chunks.append((buf, {"language": "html", "path": path, "symbol_type": "tag", "symbol_name": ""}))
                 buf = ""
         if buf.strip():
-            chunks.append((buf, {"language": "html", "path": path, "symbol_scope": "module", "symbol_name": ""}))
+            chunks.append((buf, {"language": "html", "path": path, "symbol_type": "module", "symbol_name": ""}))
         return chunks
