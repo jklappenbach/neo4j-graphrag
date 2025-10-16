@@ -86,7 +86,7 @@ class JavascriptSplitter:
                 src = code[m.start() : brace_start] + block
                 if src.strip():
                     chunks.append(
-                        (src, {"language": "js", "path": path, "symbol_scope": "class", "symbol_name": name})
+                        (src, {"language": "js", "path": path, "symbol_type": "class", "symbol_name": name})
                     )
 
         for pat in func_patterns:
@@ -98,9 +98,9 @@ class JavascriptSplitter:
                     src = code[m.start() : brace_start] + block
                     if src.strip():
                         chunks.append(
-                            (src, {"language": "js", "path": path, "symbol_scope": "function", "symbol_name": name})
+                            (src, {"language": "js", "path": path, "symbol_type": "function", "symbol_name": name})
                         )
 
         if not chunks and code.strip():
-            chunks.append((code, {"language": "js", "path": path, "symbol_scope": "module", "symbol_name": ""}))
+            chunks.append((code, {"language": "js", "path": path, "symbol_type": "module", "symbol_name": ""}))
         return chunks
