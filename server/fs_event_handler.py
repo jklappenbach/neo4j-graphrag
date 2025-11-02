@@ -1,6 +1,5 @@
 import logging
 import uuid
-from pathlib import Path
 
 from watchdog.events import FileSystemEventHandler, FileSystemEvent
 
@@ -26,7 +25,7 @@ class ProjectFileSystemEventHandler(FileSystemEventHandler):
                                          dest_path=event.dest_path,
                                          is_directory=event.is_directory,
                                          handler=self._graphrag_mgr.handle_update_path,
-                                         task_mgr=self._task_mgr))
+                                         listener=self._task_mgr))
 
     def on_moved(self, event: FileSystemEvent) -> None:
         self._task_mgr.add_task(FileTask(request_id=str(uuid.uuid4()),
@@ -36,7 +35,7 @@ class ProjectFileSystemEventHandler(FileSystemEventHandler):
                                          dest_path=event.dest_path,
                                          is_directory=event.is_directory,
                                          handler=self._graphrag_mgr.handle_update_path,
-                                         task_mgr=self._task_mgr))
+                                         listener=self._task_mgr))
 
     def on_created(self, event: FileSystemEvent) -> None:
         self._task_mgr.add_task(FileTask(request_id=str(uuid.uuid4()),
@@ -46,7 +45,7 @@ class ProjectFileSystemEventHandler(FileSystemEventHandler):
                                          dest_path=event.dest_path,
                                          is_directory=event.is_directory,
                                          handler=self._graphrag_mgr.handle_add_path,
-                                         task_mgr=self._task_mgr))
+                                         listener=self._task_mgr))
 
     def on_deleted(self, event: FileSystemEvent) -> None:
         self._task_mgr.add_task(FileTask(request_id=str(uuid.uuid4()),
@@ -56,4 +55,4 @@ class ProjectFileSystemEventHandler(FileSystemEventHandler):
                                          dest_path=event.dest_path,
                                          is_directory=event.is_directory,
                                          handler=self._graphrag_mgr.handle_delete_path,
-                                         task_mgr=self._task_mgr))
+                                         listener=self._task_mgr))

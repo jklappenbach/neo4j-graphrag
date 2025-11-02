@@ -10,8 +10,23 @@ from enum import Enum
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple, LiteralString, List
 
-from neo4j import Record
-from websocket import WebSocket
+from typing import Any
+
+# Optional imports for external dependencies to facilitate running tests without packages installed
+try:  # neo4j is optional in tests
+    from neo4j import Record as _Neo4jRecord  # type: ignore
+except Exception:  # pragma: no cover - fallback for test environments
+    _Neo4jRecord = Any  # type: ignore
+
+try:  # websocket-client is optional
+    from websocket import WebSocket as _WebSocket  # type: ignore
+except Exception:  # pragma: no cover - fallback for test environments
+    class _WebSocket:  # minimal stub for typing and annotations
+        pass
+
+# Public aliases used in type hints
+Record = _Neo4jRecord
+WebSocket = _WebSocket
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +50,7 @@ class Project:
         self._project_id = str(uuid.uuid4())
         self._name = name
         self._source_roots = source_roots
-        args = {} | args
+        args = args or {}
         self._embedder_model_name = args.get('embedder_model_name', 'default')
         self._llm_model_name = args.get('llm_model_name', 'default')
         self._query_temperature = args.get('query_temperature', 1.0)
@@ -87,8 +102,8 @@ class Project:
 
     @source_roots.setter
     def source_roots(self, value: List[str]) -> None:
-        if not isinstance(value, List):
-            raise ValueError("Project source_roots must be a List[str]")
+        if not isinstance(value, list):
+            raise ValueError("Project source_roots must be a list of strings")
         self._source_roots = value
 
     @embedder_model_name.setter
@@ -105,9 +120,10 @@ class Project:
 
     @query_temperature.setter
     def query_temperature(self, value: float) -> None:
-        if not isinstance(value, float):
-            raise ValueError("Project query_temperature must be a float")
-        self._query_temperature = value
+        # Accept ints as well, coerce to float for convenience
+        if not isinstance(value, (int, float)):
+            raise ValueError("Project query_temperature must be numeric")
+        self._query_temperature = float(value)
 
     def to_dict(self) -> Dict[str, Any]:
         return self.__dict__
@@ -116,42 +132,22 @@ class Project:
     def project_id(self, value):
         self._project_id = value
 
-
-class TaskManager(ABC):
-    """Abstract base class for status tracking implementations."""
-
+class TaskListener(ABC):
     @abstractmethod
-    def start_task(self, task) -> bool:
-        """Mark a request as started."""
+    def start_task(self, args: Dict[str, Any]) -> None:
         pass
-
     @abstractmethod
-    def complete_task(self, task, result: Dict[str, Any]) -> bool:
-        """Mark a request as completed with result."""
+    def complete_task(self, args: Dict[str, Any]) -> None:
         pass
-
     @abstractmethod
-    def fail_task(self, task, error: str) -> bool:
-        """Mark a request as failed with error."""
-        pass
-
-    @abstractmethod
-    def add_task(self, task: 'Task'):
-        pass
-
-    @abstractmethod
-    def list_active_tasks(self, request_id: str) -> List['Task']:
-        pass
-
-    @abstractmethod
-    def cancel_task(self, request_id: str):
+    def fail_task(self, args: Dict[str, Any]) -> None:
         pass
 
 class Task(ABC):
     _request_id: str
     _project_id: str
+    _listener: TaskListener
     _task_status: TaskStatus
-    _task_mgr: Optional[TaskManager]
     _created_at: float = field(default_factory=time.time)
     _started_at: Optional[float] = None
     _completed_at: Optional[float] = None
@@ -162,11 +158,11 @@ class Task(ABC):
     _total_time: Optional[float] = None
     _execution_time: Optional[float] = None
 
-    def __init__(self, request_id: str, project_id: str, task_mgr: Optional[TaskManager] = None) -> None:
+    def __init__(self, request_id: str, project_id: str, listener: TaskListener) -> None:
         """Initialize a new task for processing."""
         self._request_id = request_id
         self._project_id = project_id
-        self._task_mgr = task_mgr
+        self._listener = listener
         self._task_status = TaskStatus.QUEUED
         self._created_at = time.time()
         self._started_at = None
@@ -183,16 +179,13 @@ class Task(ABC):
         return self._request_id
 
     @classmethod
-    def from_record(cls, record: Record):
+    def from_record(cls, record: Record, listener: TaskListener):
         """Create a Task instance from a database record."""
         # Create instance with minimal args first
-        instance = cls.__new__(cls)  # Create without calling __init__
+        instance = cls(record.get('request_id'), record.get('project_id'), listener)  # Create without calling __init__
 
         # Initialize from record
-        instance._request_id = record.get("request_id")
-        instance._project_id = record.get("project_id")
         instance._task_status = TaskStatus(record.get("status"))
-        instance._task_mgr = None  # Not available when reconstructing from DB
         instance._created_at = record.get("created_at")
         instance._started_at = record.get("started_at")
         instance._completed_at = record.get("completed_at")
@@ -201,8 +194,7 @@ class Task(ABC):
         instance._is_finished = instance._task_status in [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED]
         instance._is_cancelled = instance._task_status == TaskStatus.CANCELLED
         instance._total_time = time.time() - instance._created_at if instance._created_at else None
-        instance._execution_time = (
-                instance._completed_at - instance._started_at) if instance._completed_at and instance._started_at else None
+        instance._execution_time = (instance._completed_at - instance._started_at) if instance._completed_at and instance._started_at else None
 
         return instance
 
@@ -295,6 +287,21 @@ class Task(ABC):
             "error": self._error
         }
 
+
+class TaskManager(TaskListener):
+    """Base class for status tracking implementations."""
+    @abstractmethod
+    def add_task(self, task: Task):
+        pass
+
+    @abstractmethod
+    def list_active_tasks(self, request_id: str) -> List[Task]:
+        pass
+
+    @abstractmethod
+    def cancel_task(self, request_id: str):
+        pass
+
 class GraphRagManager(ABC):
     """
     Graph-based RAG manager using Haystack with code-aware ingestion.
@@ -358,7 +365,7 @@ class GraphRagManager(ABC):
         pass
 
     @abstractmethod
-    def handle_list_documents(self, project_id: str) -> Dict[str, Any]:
+    def handle_list_documents(self, request_id: str, project_id: str) -> Dict[str, Any]:
         pass
 
     @abstractmethod

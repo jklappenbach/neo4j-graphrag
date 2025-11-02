@@ -7,10 +7,10 @@ from typing import Optional, Dict, Any, Callable, List
 from typing import Tuple, LiteralString
 
 import neo4j
+from charset_normalizer.cli import query_yes_no
 from neo4j import Record
-from watchdog.events import FileSystemEvent
 
-from server.server_defines import Task, TaskManager, FileEventType, WebSocketManager
+from server.server_defines import Task, TaskManager, FileEventType, WebSocketManager, TaskListener
 from server.task_dao import TaskDAO
 
 logger = logging.getLogger(__name__)
@@ -19,9 +19,8 @@ logger = logging.getLogger(__name__)
 class FileTask(Task):
     def __init__(self, request_id: str, project_id: str, src_path: str, dest_path: str, is_directory: bool,
                  event_type: FileEventType,
-                 handler: Callable[[str, str, str, str], None],
-                 task_mgr: TaskManager) -> None:
-        super().__init__(request_id, project_id, task_mgr)
+                 handler: Callable[[str, str, str, str], None], listener: TaskListener) -> None:
+        super().__init__(request_id, project_id, listener)
         self._event_type = event_type
         self._handler = handler
         self._src_path = src_path
@@ -32,7 +31,24 @@ class FileTask(Task):
     def from_record(cls, record: Record) -> Task:
         """Create a FileTask instance from a database record."""
         # Create base task from record
-        instance = cls.from_record(record)
+        base = Task.from_record(record)  # use base class to avoid recursion
+
+        # Build a new FileTask without calling __init__ directly
+        instance: Task = cls.__new__(cls)  # type: ignore
+        # Copy base Task fields
+        instance._request_id = base._request_id
+        instance._project_id = base._project_id
+        instance._task_mgr = base._task_mgr
+        instance._task_status = base._task_status
+        instance._created_at = base._created_at
+        instance._started_at = base._started_at
+        instance._completed_at = base._completed_at
+        instance._result = base._result
+        instance._error = base._error
+        instance._is_finished = base._is_finished
+        instance._is_cancelled = base._is_cancelled
+        instance._total_time = base._total_time
+        instance._execution_time = base._execution_time
 
         # Set FileTask-specific fields from record
         instance._event_type = FileEventType(record.get("event_type"))
@@ -50,15 +66,16 @@ class FileTask(Task):
         if self._is_cancelled:
             return
         try:
-            if self._task_mgr:
-                self._task_mgr.start_task(self._request_id)
+            if self._is_cancelled:
+                return
+            self._listener.start_task({'task': self})
             if self._handler:
                 self._handler(self._request_id, self._project_id, self._src_path, self._dest_path)
-            if self._task_mgr:
-                self._task_mgr.complete_task(self._request_id, {})
+            if self._listener:
+                self._listener.complete_task({'task': self})
         except Exception as e:
-            if self._task_mgr:
-                self._task_mgr.fail_task(self._request_id, str(e))
+            if self._listener:
+                self._listener.fail_task({'task': self, 'error': str(e)})
 
     def get_create_cypher(self) -> Tuple[LiteralString, Dict[str, Any]]:
         """Create a FileEventStatus record in Neo4j."""
@@ -147,9 +164,8 @@ class FileTask(Task):
 
 class QueryTask(Task):
     def __init__(self, request_id: str, project_id: str, query: str, args: Dict[str, Any],
-                 handler: Callable[[str, str, str, Dict[str, Any]], Dict[str, Any]],
-                 task_mgr: TaskManager) -> None:
-        super().__init__(request_id, project_id, task_mgr)
+                 handler: Callable[[str, str, str, Dict[str, Any]], Dict[str, Any]], listener: TaskListener) -> None:
+        super().__init__(request_id, project_id, listener)
         self._query = query
         self._handler = handler
         self._temperature = args.get('temperature', 1)
@@ -158,7 +174,7 @@ class QueryTask(Task):
         self._query_prefix = args.get('query_prefix', 'default')
 
     @classmethod
-    def from_record(cls, record: Record) -> 'QueryTask':
+    def from_record(cls, record: Record) -> Task:
         """Create a QueryTask instance from a database record."""
         instance = cls.from_record(record)
 
@@ -175,12 +191,14 @@ class QueryTask(Task):
         if self._is_cancelled:
             return
         try:
-            self._task_mgr.start_task(self._request_id)
-            query_result = self._handler(self._request_id, self._query)
-            if self._task_mgr:
-                self._task_mgr.complete_task(self._request_id, query_result)
+            query_result = {}
+            self._listener.start_task({'task': self})
+            if self._handler:
+                query_result = self._handler(self._request_id, self._query)
+            if self._listener:
+                self._listener.complete_task({'task': self, 'results': query_result})
         except Exception as e:
-            self._task_mgr.fail_task(self._request_id, str(e))
+            self._listener.fail_task(self._request_id, str(e))
 
     def get_create_cypher(self) -> tuple[str, Dict[str, str | float | None]]:
         query = """
@@ -253,13 +271,12 @@ class QueryTask(Task):
 class RefreshTask(Task):
     def __init__(self, request_id: str,
                  project_id: str,
-                 handler: Callable[[str], Dict[str, Any]],
-                 task_mgr: TaskManager) -> None:
-        super().__init__(request_id, project_id, task_mgr)
+                 handler: Callable[[str, str], Dict[str, Any]], listener: TaskListener) -> None:
+        super().__init__(request_id, project_id, listener)
         self._handler = handler
 
     @classmethod
-    def from_record(cls, record: Record) -> 'RefreshTask':
+    def from_record(cls, record: Record) -> Task:
         """Create a RefreshTask instance from a database record."""
         instance = cls.from_record(record)
 
@@ -272,15 +289,13 @@ class RefreshTask(Task):
         if self._is_cancelled:
             return
         try:
-            if self._task_mgr:
-                self._task_mgr.start_task(self._request_id)
+            self._listener.start_task({'task': self})
             if self._handler:
                 self._handler(self._request_id)
-            if self._task_mgr:
-                self._task_mgr.complete_task(self._request_id, {})
+            self._listener.complete_task({'task': self})
         except Exception as e:
-            if self._task_mgr:
-                self._task_mgr.fail_task(self._request_id, str(e))
+            if self._listener:
+                self._listener.fail_task({'task': self, 'error': str(e)})
 
     def get_task_type(self) -> str:
         return "RefreshTask"
@@ -344,13 +359,12 @@ class RefreshTask(Task):
 
 class ListDocumentsTask(Task):
     def __init__(self, request_id: str, project_id: str,
-                 handler: Callable[[str], Dict[str, Any]],
-                 task_mgr: TaskManager) -> None:
-        super().__init__(request_id, project_id, task_mgr)
+                 handler: Callable[[str, str], Dict[str, Any]], listener: TaskListener) -> None:
+        super().__init__(request_id, project_id, listener)
         self._handler = handler
 
     @classmethod
-    def from_record(cls, record: Record) -> 'ListDocumentsTask':
+    def from_record(cls, record: Record) -> Task:
         """Create a ListDocumentsTask instance from a database record."""
         instance = cls.from_record(record)
 
@@ -363,15 +377,12 @@ class ListDocumentsTask(Task):
         if self._is_cancelled:
             return
         try:
-            if self._task_mgr:
-                self._task_mgr.start_task(self._request_id)
-            if self._handler:
-                result = self._handler(self._request_id)
-                if self._task_mgr:
-                    self._task_mgr.complete_task(self._request_id, result)
+            self._listener.start_task({'task': self})
+            result = self._handler(self._request_id, self._project_id)
+            self._listener.complete_task({'task': self, 'result': result})
         except Exception as e:
-            if self._task_mgr:
-                self._task_mgr.fail_task(self._request_id, str(e))
+            if self._listener:
+                self._listener.fail_task({'task': self, 'error': str(e)})
 
     def get_task_type(self) -> str:
         return "ListDocumentsTask"
@@ -505,8 +516,9 @@ class TaskManagerImpl(TaskManager):
             logger.exception("Error adding task: %s", str(e))
             raise e
 
-    def start_task(self, task: Task) -> None:
+    def start_task(self, args: Dict[str, Any]) -> None:
         try:
+            task: Task = args['task']
             with self._lock:
                 task.start_processing()
                 query, parameters = task.get_update_cypher()
@@ -520,33 +532,35 @@ class TaskManagerImpl(TaskManager):
         except Exception as e:
             logger.exception("Error starting task: %s", str(e))
 
-    def complete_task(self, task: Task, result: Dict[str, Any]) -> None:
+    def complete_task(self, args: Dict[str, Any]) -> None:
         try:
+            task: Task = args['task']
             with self._lock:
-                task.complete_with_result(result)
+                task.complete_with_result(args['result'])
                 query, parameters = task.get_update_cypher()
                 self._dao.update_task_record(query, parameters)
                 self._notify(task.request_id, {
                         "type": "task_completed",
                         "task_type": task.get_task_type(),
                         "success": True,
-                        "result": result,
+                        "result": args['result'],
                         "task_info": task.to_dict()
                     })
         except Exception as e:
             logger.exception("Error completing task: %s", str(e))
 
-    def fail_task(self, task: Task, error: str) -> None:
+    def fail_task(self, args: Dict[str, Any]) -> None:
         try:
+            task: Task = args['task']
             with self._lock:
-                task.fail_with_error(error)
+                task.fail_with_error(args['error'])
                 query, properties = task.get_update_cypher()
                 self._dao.update_task_record(query, properties)
                 self._notify(task.request_id, {
                         "type": "task_failed",
                         "task_type": task.get_task_type(),
                         "success": False,
-                        "error": error,
+                        "error": args['error'],
                         "task_info": task.to_dict()
                     })
         except Exception as e:

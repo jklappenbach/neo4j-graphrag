@@ -1,11 +1,21 @@
 
 """Data Access Object for Task records in Neo4j."""
+from __future__ import annotations
 import logging
 from typing import Optional, List, Dict, Any, LiteralString
 
-import neo4j
-from neo4j import Record
-from neo4j.exceptions import Neo4jError
+from typing import Any
+
+# Optional neo4j imports for test environments without the package installed
+try:  # pragma: no cover
+    import neo4j  # type: ignore
+    from neo4j import Record  # type: ignore
+    from neo4j.exceptions import Neo4jError  # type: ignore
+except Exception:  # pragma: no cover - provide fallbacks for tests
+    neo4j = None  # type: ignore
+    Record = Any  # type: ignore
+    class Neo4jError(Exception):
+        pass
 
 from server.server_defines import TaskStatus
 

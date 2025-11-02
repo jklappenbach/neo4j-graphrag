@@ -10,6 +10,7 @@ from typing import Any, Dict, List
 import neo4j
 from fastapi import Body, FastAPI, WebSocket, HTTPException
 from fastapi import Request
+import asyncio
 from neo4j import GraphDatabase
 from starlette.responses import HTMLResponse
 
@@ -99,6 +100,15 @@ async def dashboard(_: Request):
 async def websocket_endpoint(websocket: WebSocket):
     connection_id = str(uuid.uuid4())
     await websocket_manager.connect(websocket, connection_id)
+    # Keep the handler alive while the connection is registered to avoid immediate closure
+    try:
+        while True:
+            # Break if the connection has been removed by the manager (client disconnected)
+            if not getattr(websocket_manager, "_connections", {}).get(connection_id):
+                break
+            await asyncio.sleep(1)
+    except Exception:
+        pass
 
 @app.post("/query")
 async def create_query(project_id: str, query: str = Body(..., embed=True),
@@ -173,6 +183,18 @@ def list_scheduled():
         global task_manager
         ops = task_manager.list_active_tasks()
         return {"ok": True, "operations": ops}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/projects/{project_id}/documents", response_model=Dict[str, Any])
+def list_project_documents(project_id: str):
+    """Trigger an async task to list documents for a project. Results are delivered via WebSocket when done."""
+    request_id = str(uuid.uuid4())
+    try:
+        global graph_rag_manager
+        res = graph_rag_manager.list_documents(request_id, project_id)
+        # Return the ack with request_id; the actual lists will arrive on WS as task_completed for ListDocumentsTask
+        return {"ok": True, "request_id": request_id, **({} if not isinstance(res, dict) else {})}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     

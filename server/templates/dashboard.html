@@ -768,8 +768,10 @@
     try {
       const tbody = document.querySelector('#docs-' + project.project_id + ' tbody');
       if (tbody) tbody.innerHTML = '';
+      // Trigger server to list documents; results will arrive via WebSocket as task_completed for ListDocumentsTask
+      await fetch('/api/projects/' + encodeURIComponent(project.project_id) + '/documents');
     } catch (e) {
-      console.error(e);
+      console.error('Failed to load project documents', e);
     }
   }
 
@@ -872,7 +874,8 @@
   document.getElementById('createProjectBtn').addEventListener('click', createProject);
 
   function connectWS() {
-    ws = new WebSocket(`ws://${location.host}/ws/events`);
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    ws = new WebSocket(`${proto}://${location.host}/ws/events`);
     ws.onopen = () => console.log('WS connected');
     ws.onmessage = (evt) => {
       try {
@@ -882,8 +885,8 @@
         const reqId = msg.request_id || msg.requestId || 'n/a';
         const row = {
           request_id: reqId,
-          project_id: msg.project_id || '',
-          task_type: msg.task_type || '',
+          project_id: (msg.task_info && msg.task_info.project_id) || msg.project_id || '',
+          task_type: msg.task_type || (msg.task_info && msg.task_info.task_type) || '',
           status: t
         };
         if (t === 'task_enqueued' || t === 'task_started') {
@@ -891,6 +894,23 @@
         } else if (t === 'task_completed' || t === 'task_failed' || t === 'task_cancelled') {
           activeTasks.delete(reqId);
           recentTasks.push(row);
+        }
+        // Handle document list response from ListDocumentsTask
+        if (t === 'task_completed' && (row.task_type === 'ListDocumentsTask')) {
+          const pid = row.project_id;
+          if (pid) {
+            const result = msg.result || {};
+            const docs = Array.isArray(result.documentStore) ? result.documentStore : [];
+            const tbody = document.querySelector('#docs-' + pid + ' tbody');
+            if (tbody) {
+              if (!docs.length) {
+                tbody.innerHTML = '<tr><td class="muted">No ingested documents found</td></tr>';
+              } else {
+                const unique = Array.from(new Set(docs)).sort((a,b) => a.localeCompare(b));
+                tbody.innerHTML = unique.map(p => '<tr><td>' + htmlEscape(p) + '</td></tr>').join('');
+              }
+            }
+          }
         }
         renderActiveTasks();
         renderRecentTasks();

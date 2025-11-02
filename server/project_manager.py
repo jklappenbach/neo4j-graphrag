@@ -1,7 +1,6 @@
 import contextlib
 import logging
 import os
-import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, LiteralString
 
@@ -18,8 +17,6 @@ from haystack_integrations.components.embedders.ollama import OllamaDocumentEmbe
 from neo4j import Driver, GraphDatabase
 from neo4j_haystack import Neo4jDocumentStore
 from watchdog.observers import Observer
-
-from server.graph_rag_manager import _ProjectEntry
 from server.pipeline.code_relationship_extractor import CodeRelationshipExtractor
 from server.pipeline.css_splitter import CssSplitter
 from server.pipeline.graph_document_expander import GraphAwareRetriever
