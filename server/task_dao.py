@@ -58,9 +58,9 @@ class TaskDAO:
 
             with self.driver.session() as session:
                 # Use a generic update query that works for all task types
-                result = session.run(query, parameters)
+                result = session.run(query=query, parameters=parameters)
 
-                if len(result.fetch()) > 0:
+                if len(result.fetch(1)) > 0:
                     logger.info("Successfully updated task record: %s", request_id)
                     return True
                 else:

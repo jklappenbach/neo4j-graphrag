@@ -211,7 +211,6 @@ class QueryTask(Task):
             created_at: $created_at,
             started_at: $started_at,
             completed_at: $completed_at,
-            result: $result,
             error: $error
         })
         RETURN q.request_id as request_id
@@ -226,7 +225,6 @@ class QueryTask(Task):
             "created_at": self._created_at,
             "started_at": self._started_at,
             "completed_at": self._completed_at,
-            "result": json.dumps(self._result) if self._result else None,
             "error": self._error
         }
         return query, parameters
@@ -291,7 +289,7 @@ class RefreshTask(Task):
         try:
             self._listener.start_task({'task': self})
             if self._handler:
-                self._handler(self._request_id)
+                self._handler(self._request_id, self._project_id)
             self._listener.complete_task({'task': self})
         except Exception as e:
             if self._listener:
@@ -333,12 +331,10 @@ class RefreshTask(Task):
         query: LiteralString = """
         MATCH (f:ProcessingStatus:RefreshTask {request_id: $request_id})
         SET f.task_type = $task_type,
-            f.query = $query,
             f.status = $status,
             f.created_at = $created_at,
             f.started_at = $started_at,
             f.completed_at = $completed_at,
-            f.result = $result,
             f.error = $error
         RETURN f.request_id as request_id
         """
@@ -350,7 +346,6 @@ class RefreshTask(Task):
             "created_at": self._created_at,
             "started_at": self._started_at,
             "completed_at": self._completed_at,
-            "result": json.dumps(self._result) if self._result else None,
             "error": self._error
         }
 
@@ -420,7 +415,6 @@ class ListDocumentsTask(Task):
         query: LiteralString = """
         MATCH (f:ProcessingStatus:ListTask {request_id: $request_id})
         SET f.task_type = $task_type,
-            f.query = $query,
             f.status = $status,
             f.created_at = $created_at,
             f.started_at = $started_at,

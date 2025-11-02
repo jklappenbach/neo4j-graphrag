@@ -370,11 +370,12 @@ class GraphRagManagerImpl(GraphRagManager):
                 project_entry = _ProjectEntry(project)
                 self._project_entries[project.project_id] = project_entry
                 project_entry.db_driver = GraphDatabase.driver(self._neo4j_url, auth=(self._username, self._password))
-                # Perform incremental sync at startup
-                self.handle_sync_project("system" + str(uuid.uuid4()), project.project_id)
+                # Create and execute sync task asynchronously instead of direct execution
+                request_id = "system" + str(uuid.uuid4())
+                self._task_mgr.add_task(
+                    RefreshTask(request_id, project.project_id, self.handle_sync_project, self._task_mgr))
             except Exception as e:
                 logger.exception("Startup sync failed for %s, cause: %s", project.project_id, str(e))
-
     # ---------------------
     # Lifecycle API
     # ---------------------
