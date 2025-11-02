@@ -1,525 +1,657 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8" />
-<title>Graph RAG Dashboard</title>
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<style>
-  /* Apple-inspired minimal aesthetic */
-  :root {
-    --bg: #0a0a0a;              /* near-black for depth */
-    --panel: #0e0e0e;           /* subtle contrast */
-    --card: #0f0f0f;            /* surfaces */
-    --text: #f5f5f7;            /* Apple text on dark */
-    --muted: #a1a1a6;           /* secondary text */
-    --primary: #0071e3;         /* Apple blue */
-    --primary-strong: #0a84ff;  /* hover/active */
-    --accent: #64d2ff;          /* light accent */
-    --border: #1c1c1e;          /* iOS separator-like */
-    --pill-bg: #1c1c1e;
-    --pill-fg: #f5f5f7;
-    --tab-bg: #0f0f0f;
-    --tab-active: #121212;
-    --focus: #0a84ff;
-    --shadow: 0 20px 60px rgba(0,0,0,.6);
-    --radius: 14px;
-    --gap: 12px;
-  }
-  html, body { height: 100%; }
-  body {
-    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Helvetica Neue", Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
-    margin: 0; padding: 0;
-    color: var(--text);
-    background: radial-gradient(1200px 800px at 20% -10%, #0b0b0b 10%, #0a0a0a 40%, #000 100%);
-    -webkit-font-smoothing: antialiased;
-    -moz-osx-font-smoothing: grayscale;
-  }
+    <meta charset="UTF-8"/>
+    <title>Graph RAG Dashboard</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1"/>
+    <style>
+        /* Apple-inspired minimal aesthetic */
+        :root {
+            --bg: #0a0a0a; /* near-black for depth */
+            --panel: #0e0e0e; /* subtle contrast */
+            --card: #0f0f0f; /* surfaces */
+            --text: #f5f5f7; /* Apple text on dark */
+            --muted: #a1a1a6; /* secondary text */
+            --primary: #0071e3; /* Apple blue */
+            --primary-strong: #0a84ff; /* hover/active */
+            --accent: #64d2ff; /* light accent */
+            --border: #1c1c1e; /* iOS separator-like */
+            --pill-bg: #1c1c1e;
+            --pill-fg: #f5f5f7;
+            --tab-bg: #0f0f0f;
+            --tab-active: #121212;
+            --focus: #0a84ff;
+            --shadow: 0 20px 60px rgba(0, 0, 0, .6);
+            --radius: 14px;
+            --gap: 12px;
+        }
 
-  header {
-    background: linear-gradient(90deg, #0b0b0b, #0e0e0e 60%, #0b0b0b);
-    color: var(--text);
-    padding: 16px 20px;
-    border-bottom: 1px solid var(--border);
-    box-shadow: var(--shadow);
-    position: sticky; top: 0; z-index: 10;
-  }
-  h1 {
-    margin: 0;
-    font-size: 20px;
-    letter-spacing: 0.2px;
-    font-weight: 600;
-  }
+        html, body {
+            height: 100%;
+        }
 
-    .tabs {
-    display: flex; gap: 6px;
-    background: transparent;
-    padding: 12px 12px 0 12px;
-    border-bottom: 1px solid var(--border);
-    overflow-x: auto;
-    backdrop-filter: saturate(180%) blur(10px);
-  }
-  .tab {
-    position: relative; /* for active indicator */
-    padding: 10px 14px 14px 14px; /* extra space for indicator */
-    background: var(--tab-bg);
-    border: 1px solid var(--border);
-    border-bottom: none;
-    cursor: pointer;
-    border-radius: 12px 12px 0 0;
-    white-space: nowrap;
-    color: var(--text);
-    box-shadow: inset 0 1px 0 rgba(255,255,255,.03);
-    transition: background .2s ease, color .2s ease, border-color .2s ease;
-  }
-  .tab:hover { color: var(--accent); }
-  /* Active tab: show a bottom (top-of-panel) indicator line like popular UIs */
-  .tab.active {
-    background: var(--tab-active);
-    color: var(--text);
-    border-bottom: 1px solid var(--tab-active);
-  }
-  .tab.active::after {
-    content: "";
-    position: absolute;
-    left: 12px;
-    right: 12px;
-    bottom: -1px;              /* sits on the panel border */
-    height: 3px;               /* prominent indicator */
-    border-radius: 2px;
-    background: var(--primary); /* Apple-like blue indicator */
-  }
-  /* Ensure unselected tabs have no indicator */
-  .tab::after { display: none; }
-  .tab.active::after { display: block; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Helvetica Neue", Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+            margin: 0;
+            padding: 0;
+            color: var(--text);
+            background: radial-gradient(1200px 800px at 20% -10%, #0b0b0b 10%, #0a0a0a 40%, #000 100%);
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+        }
 
-  .panel {
-    padding: 18px;
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-top: none;
-  }
+        header {
+            background: linear-gradient(90deg, #0b0b0b, #0e0e0e 60%, #0b0b0b);
+            color: var(--text);
+            padding: 16px 20px;
+            border-bottom: 1px solid var(--border);
+            box-shadow: var(--shadow);
+            position: sticky;
+            top: 0;
+            z-index: 10;
+        }
 
-  .grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit,minmax(320px,1fr));
-    gap: 20px;
-  }
-  .card {
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    background: linear-gradient(180deg, #111, #0e0e0e);
-    padding: 16px;
-    box-shadow: var(--shadow);
-  }
-  .card h3 {
-    margin: 0 0 12px 0;
-    font-size: 16px;
-    color: var(--text);
-    font-weight: 600;
-  }
+        h1 {
+            margin: 0;
+            font-size: 20px;
+            letter-spacing: 0.2px;
+            font-weight: 600;
+        }
 
-  table { border-collapse: collapse; width: 100%; color: var(--text); }
-  th, td {
-    padding: 12px 12px;
-    border-bottom: 1px solid var(--border);
-    text-align: left;
-    font-size: 14px;
-  }
-  thead th { color: var(--muted); font-weight: 600; background: #121212; }
+        .tabs {
+            display: flex;
+            gap: 6px;
+            background: transparent;
+            padding: 12px 12px 0 12px;
+            border-bottom: 1px solid var(--border);
+            overflow-x: auto;
+            backdrop-filter: saturate(180%) blur(10px);
+        }
 
-  input[type=text] {
-    width: 100%;
-    padding: 12px 12px;
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    background: #0f0f0f;
-    color: var(--text);
-    outline: none;
-    transition: border-color .15s, box-shadow .15s, background .2s;
-    margin: calc(var(--gap) / 2) 0;
-  }
-  input[type=text]::placeholder { color: #7c7c80; }
-  input[type=text]:focus {
-    border-color: var(--focus);
-    box-shadow: 0 0 0 3px rgba(10,132,255,.18);
-    background: #111;
-  }
+        .tab {
+            position: relative; /* for active indicator */
+            padding: 10px 14px 14px 14px; /* extra space for indicator */
+            background: var(--tab-bg);
+            border: 1px solid var(--border);
+            border-bottom: none;
+            cursor: pointer;
+            border-radius: 12px 12px 0 0;
+            white-space: nowrap;
+            color: var(--text);
+            box-shadow: inset 0 1px 0 rgba(255, 255, 255, .03);
+            transition: background .2s ease, color .2s ease, border-color .2s ease;
+        }
 
-  button {
-    background: linear-gradient(180deg, var(--primary), var(--primary-strong));
-    color: white;
-    border: 1px solid rgba(255,255,255,.06);
-    padding: 10px 14px;
-    border-radius: 10px;
-    cursor: pointer;
-    box-shadow: 0 6px 18px rgba(10,132,255,.25), inset 0 1px 0 rgba(255,255,255,.06);
-    transition: transform .05s ease-in, filter .15s ease-in-out, box-shadow .2s;
-    margin: calc(var(--gap) / 2) 0;
-    font-weight: 600;
-  }
-  button:hover { filter: brightness(1.04); box-shadow: 0 8px 22px rgba(10,132,255,.32), inset 0 1px 0 rgba(255,255,255,.08); }
-  button:active { transform: translateY(1px); }
-  button.secondary {
-    background: linear-gradient(180deg, #1f1f1f, #1a1a1a);
-    border-color: #2a2a2a;
-    color: var(--text);
-    box-shadow: 0 4px 12px rgba(0,0,0,.3);
-  }
-  button.secondary:hover { filter: brightness(1.02); }
+        .tab:hover {
+            color: var(--accent);
+        }
 
-  .listbox {
-    width: 100%;
-    height: 160px;
-    background: #0f0f0f;
-    color: var(--text);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-  }
+        /* Active tab: show a bottom (top-of-panel) indicator line like popular UIs */
+        .tab.active {
+            background: var(--tab-active);
+            color: var(--text);
+            border-bottom: 1px solid var(--tab-active);
+        }
 
-  .pill {
-    display: inline-block;
-    background: var(--pill-bg);
-    color: var(--pill-fg);
-    padding: 6px 12px;
-    margin: 4px;
-    border-radius: 999px;
-    font-size: 12px;
-    border: 1px solid var(--border);
-  }
-  .muted { color: var(--muted); font-size: 13px; }
-  .row { display: flex; gap: var(--gap); align-items: center; flex-wrap: wrap; margin: calc(var(--gap) / 2) 0; }
+        .tab.active::after {
+            content: "";
+            position: absolute;
+            left: 12px;
+            right: 12px;
+            bottom: -1px; /* sits on the panel border */
+            height: 3px; /* prominent indicator */
+            border-radius: 2px;
+            background: var(--primary); /* Apple-like blue indicator */
+        }
 
-  /* Make the source root row with a narrower input and buttons to its right */
-  .source-root-row {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-  }
-  .source-root-row .root-input {
-    flex: 0 1 60%;            /* narrower than full width */
-    min-width: 260px;
-    max-width: 520px;
-  }
-  .source-root-row .actions {
-    display: inline-flex;
-    gap: 10px;
-    margin-left: 0;
-  }
+        /* Ensure unselected tabs have no indicator */
+        .tab::after {
+            display: none;
+        }
 
-  .icon-btn {
-    display: inline-flex; align-items: center; justify-content: center;
-    width: 40px; height: 40px; padding: 0;
-    border-radius: 10px;
-    background: linear-gradient(180deg, #1f1f1f, #1a1a1a);
-    border: 1px solid #2a2a2a;
-    color: var(--text);
-    box-shadow: 0 4px 12px rgba(0,0,0,.3);
-  }
-  .icon-btn svg { width: 20px; height: 20px; fill: currentColor; }
-  button:disabled { opacity: .5; cursor: not-allowed; }
+        .tab.active::after {
+            display: block;
+        }
 
-    /* Directory Picker Modal */
-  .modal-overlay {
-    position: fixed;
-    top: 0; left: 0; right: 0; bottom: 0;
-    background: rgba(0,0,0,.75);
-    backdrop-filter: blur(8px);
-    display: none;
-    align-items: center;
-    justify-content: center;
-    z-index: 1000;
-  }
-  .modal-overlay.show { display: flex; }
+        .panel {
+            padding: 18px;
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-top: none;
+        }
 
-  .modal {
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    box-shadow: 0 25px 70px rgba(0,0,0,.8);
-    width: 90%;
-    max-width: 700px;
-    max-height: 80vh;
-    display: flex;
-    flex-direction: column;
-  }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+            gap: 20px;
+        }
 
-  .modal-header {
-    padding: 16px 18px;
-    border-bottom: 1px solid var(--border);
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-  }
-  .modal-header h2 {
-    margin: 0;
-    font-size: 17px;
-    font-weight: 600;
-    color: var(--text);
-  }
-  .modal-close {
-    background: transparent;
-    border: none;
-    color: var(--muted);
-    font-size: 24px;
-    cursor: pointer;
-    padding: 0;
-    width: 28px;
-    height: 28px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    border-radius: 6px;
-    transition: background .15s, color .15s;
-  }
-  .modal-close:hover { background: #1f1f1f; color: var(--text); }
+        .card {
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            background: linear-gradient(180deg, #111, #0e0e0e);
+            padding: 16px;
+            box-shadow: var(--shadow);
+        }
 
-  .modal-body {
-    padding: 16px 18px;
-    overflow-y: auto;
-    flex: 1;
-  }
+        .card h3 {
+            margin: 0 0 12px 0;
+            font-size: 16px;
+            color: var(--text);
+            font-weight: 600;
+        }
 
-  .breadcrumb {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    margin-bottom: 12px;
-    font-size: 13px;
-    color: var(--muted);
-    flex-wrap: wrap;
-  }
-  .breadcrumb-item {
-    color: var(--primary);
-    cursor: pointer;
-    transition: color .15s;
-  }
-  .breadcrumb-item:hover { color: var(--accent); }
-  .breadcrumb-sep { color: var(--muted); }
+        table {
+            border-collapse: collapse;
+            width: 100%;
+            color: var(--text);
+        }
 
-  .dir-list {
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    background: #0f0f0f;
-    max-height: 400px;
-    overflow-y: auto;
-  }
-  .dir-item {
-    padding: 10px 12px;
-    border-bottom: 1px solid var(--border);
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    cursor: pointer;
-    transition: background .15s;
-  }
-  .dir-item:last-child { border-bottom: none; }
-  .dir-item:hover { background: #1a1a1a; }
-  .dir-item.selected { background: #1f1f1f; border-left: 3px solid var(--primary); }
-  .dir-item .icon {
-    width: 20px;
-    height: 20px;
-    flex-shrink: 0;
-  }
-  .dir-item .icon svg { width: 100%; height: 100%; fill: var(--accent); }
-  .dir-item .name {
-    flex: 1;
-    color: var(--text);
-    font-size: 14px;
-  }
-  .dir-item.up .name { color: var(--muted); font-style: italic; }
+        th, td {
+            padding: 12px 12px;
+            border-bottom: 1px solid var(--border);
+            text-align: left;
+            font-size: 14px;
+        }
 
-  .modal-footer {
-    padding: 14px 18px;
-    border-top: 1px solid var(--border);
-    display: flex;
-    justify-content: flex-end;
-    gap: 10px;
-  }
+        thead th {
+            color: var(--muted);
+            font-weight: 600;
+            background: #121212;
+        }
 
-  .search-box {
-    margin-bottom: 12px;
-  }
-  .search-box input {
-    margin: 0;
-  }
+        input[type=text] {
+            width: 100%;
+            padding: 12px 12px;
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            background: #0f0f0f;
+            color: var(--text);
+            outline: none;
+            transition: border-color .15s, box-shadow .15s, background .2s;
+            margin: calc(var(--gap) / 2) 0;
+        }
 
-</style>
+        input[type=text]::placeholder {
+            color: #7c7c80;
+        }
+
+        input[type=text]:focus {
+            border-color: var(--focus);
+            box-shadow: 0 0 0 3px rgba(10, 132, 255, .18);
+            background: #111;
+        }
+
+        button {
+            background: linear-gradient(180deg, var(--primary), var(--primary-strong));
+            color: white;
+            border: 1px solid rgba(255, 255, 255, .06);
+            padding: 10px 14px;
+            border-radius: 10px;
+            cursor: pointer;
+            box-shadow: 0 6px 18px rgba(10, 132, 255, .25), inset 0 1px 0 rgba(255, 255, 255, .06);
+            transition: transform .05s ease-in, filter .15s ease-in-out, box-shadow .2s;
+            margin: calc(var(--gap) / 2) 0;
+            font-weight: 600;
+        }
+
+        button:hover {
+            filter: brightness(1.04);
+            box-shadow: 0 8px 22px rgba(10, 132, 255, .32), inset 0 1px 0 rgba(255, 255, 255, .08);
+        }
+
+        button:active {
+            transform: translateY(1px);
+        }
+
+        button.secondary {
+            background: linear-gradient(180deg, #1f1f1f, #1a1a1a);
+            border-color: #2a2a2a;
+            color: var(--text);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, .3);
+        }
+
+        button.secondary:hover {
+            filter: brightness(1.02);
+        }
+
+        .listbox {
+            width: 100%;
+            height: 160px;
+            background: #0f0f0f;
+            color: var(--text);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+        }
+
+        .pill {
+            display: inline-block;
+            background: var(--pill-bg);
+            color: var(--pill-fg);
+            padding: 6px 12px;
+            margin: 4px;
+            border-radius: 999px;
+            font-size: 12px;
+            border: 1px solid var(--border);
+        }
+
+        .muted {
+            color: var(--muted);
+            font-size: 13px;
+        }
+
+        .row {
+            display: flex;
+            gap: var(--gap);
+            align-items: center;
+            flex-wrap: wrap;
+            margin: calc(var(--gap) / 2) 0;
+        }
+
+        /* Make the source root row with a narrower input and buttons to its right */
+        .source-root-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .source-root-row .root-input {
+            flex: 0 1 60%; /* narrower than full width */
+            min-width: 260px;
+            max-width: 520px;
+        }
+
+        .source-root-row .actions {
+            display: inline-flex;
+            gap: 10px;
+            margin-left: 0;
+        }
+
+        .icon-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 40px;
+            height: 40px;
+            padding: 0;
+            border-radius: 10px;
+            background: linear-gradient(180deg, #1f1f1f, #1a1a1a);
+            border: 1px solid #2a2a2a;
+            color: var(--text);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, .3);
+        }
+
+        .icon-btn svg {
+            width: 20px;
+            height: 20px;
+            fill: currentColor;
+        }
+
+        button:disabled {
+            opacity: .5;
+            cursor: not-allowed;
+        }
+
+        /* Directory Picker Modal */
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, .75);
+            backdrop-filter: blur(8px);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+        }
+
+        .modal-overlay.show {
+            display: flex;
+        }
+
+        .modal {
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            box-shadow: 0 25px 70px rgba(0, 0, 0, .8);
+            width: 90%;
+            max-width: 700px;
+            max-height: 80vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .modal-header {
+            padding: 16px 18px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .modal-header h2 {
+            margin: 0;
+            font-size: 17px;
+            font-weight: 600;
+            color: var(--text);
+        }
+
+        .modal-close {
+            background: transparent;
+            border: none;
+            color: var(--muted);
+            font-size: 24px;
+            cursor: pointer;
+            padding: 0;
+            width: 28px;
+            height: 28px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 6px;
+            transition: background .15s, color .15s;
+        }
+
+        .modal-close:hover {
+            background: #1f1f1f;
+            color: var(--text);
+        }
+
+        .modal-body {
+            padding: 16px 18px;
+            overflow-y: auto;
+            flex: 1;
+        }
+
+        .breadcrumb {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin-bottom: 12px;
+            font-size: 13px;
+            color: var(--muted);
+            flex-wrap: wrap;
+        }
+
+        .breadcrumb-item {
+            color: var(--primary);
+            cursor: pointer;
+            transition: color .15s;
+        }
+
+        .breadcrumb-item:hover {
+            color: var(--accent);
+        }
+
+        .breadcrumb-sep {
+            color: var(--muted);
+        }
+
+        .dir-list {
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            background: #0f0f0f;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        .dir-item {
+            padding: 10px 12px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            cursor: pointer;
+            transition: background .15s;
+        }
+
+        .dir-item:last-child {
+            border-bottom: none;
+        }
+
+        .dir-item:hover {
+            background: #1a1a1a;
+        }
+
+        .dir-item.selected {
+            background: #1f1f1f;
+            border-left: 3px solid var(--primary);
+        }
+
+        .dir-item .icon {
+            width: 20px;
+            height: 20px;
+            flex-shrink: 0;
+        }
+
+        .dir-item .icon svg {
+            width: 100%;
+            height: 100%;
+            fill: var(--accent);
+        }
+
+        .dir-item .name {
+            flex: 1;
+            color: var(--text);
+            font-size: 14px;
+        }
+
+        .dir-item.up .name {
+            color: var(--muted);
+            font-style: italic;
+        }
+
+        .modal-footer {
+            padding: 14px 18px;
+            border-top: 1px solid var(--border);
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+        }
+
+        .search-box {
+            margin-bottom: 12px;
+        }
+
+        .search-box input {
+            margin: 0;
+        }
+
+    </style>
 </head>
 <body>
 <header><h1>Graph RAG Dashboard</h1></header>
 
 <div class="tabs" id="tabs">
-  <div class="tab active" data-tab="main">Main</div>
+    <div class="tab active" data-tab="main">Main</div>
 </div>
 
 <div class="panel" id="panel-main" style="display:block">
-  <div class="grid">
-    <div class="card">
-      <h3>Create Project</h3>
-      <div class="row">
-        <input type="text" id="newProjectName" placeholder="Project name" />
-      </div>
-      <!-- Source roots field removed -->
-      <div class="row">
-        <button id="createProjectBtn">Create</button>
-      </div>
+    <div class="grid">
+        <div class="card">
+            <h3>Create Project</h3>
+            <div class="row">
+                <input type="text" id="newProjectName" placeholder="Project name"/>
+            </div>
+            <!-- Source roots field removed -->
+            <div class="row">
+                <button id="createProjectBtn">Create</button>
+            </div>
+        </div>
+
+        <div class="card">
+            <h3>Projects</h3>
+            <div id="projectsList" class="muted">Loading...</div>
+        </div>
+
+        <div class="card">
+            <h3>Server Health</h3>
+            <div id="serverHealth" class="muted">Loading...</div>
+        </div>
     </div>
 
-    <div class="card">
-      <h3>Projects</h3>
-      <div id="projectsList" class="muted">Loading...</div>
+    <div class="card" style="margin-top:16px">
+        <h3>Active Tasks</h3>
+        <table id="activeTasksTable">
+            <thead>
+            <tr>
+                <th>Request ID</th>
+                <th>Project</th>
+                <th>Type</th>
+                <th>Status</th>
+                <th>Updated</th>
+            </tr>
+            </thead>
+            <tbody></tbody>
+        </table>
     </div>
 
-    <div class="card">
-      <h3>Server Health</h3>
-      <div id="serverHealth" class="muted">Loading...</div>
+    <div class="card" style="margin-top:16px">
+        <h3>Recent Tasks</h3>
+        <table id="recentTasksTable">
+            <thead>
+            <tr>
+                <th>Request ID</th>
+                <th>Project</th>
+                <th>Type</th>
+                <th>Status</th>
+                <th>Completed</th>
+            </tr>
+            </thead>
+            <tbody></tbody>
+        </table>
     </div>
-  </div>
-
-  <div class="card" style="margin-top:16px">
-    <h3>Active Tasks</h3>
-    <table id="activeTasksTable">
-      <thead><tr><th>Request ID</th><th>Project</th><th>Type</th><th>Status</th><th>Updated</th></tr></thead>
-      <tbody></tbody>
-    </table>
-  </div>
-
-  <div class="card" style="margin-top:16px">
-    <h3>Recent Tasks</h3>
-    <table id="recentTasksTable">
-      <thead><tr><th>Request ID</th><th>Project</th><th>Type</th><th>Status</th><th>Completed</th></tr></thead>
-      <tbody></tbody>
-    </table>
-  </div>
 </div>
 
 <div id="projectPanels"></div>
 
 <!-- Directory Picker Modal -->
 <div class="modal-overlay" id="dirPickerOverlay">
-  <div class="modal">
-    <div class="modal-header">
-      <h2>Select Directory</h2>
-      <button class="modal-close" id="closeDirPicker">&times;</button>
+    <div class="modal">
+        <div class="modal-header">
+            <h2>Select Directory</h2>
+            <button class="modal-close" id="closeDirPicker">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div class="search-box">
+                <input type="text" id="dirSearchInput" placeholder="Filter directories..."/>
+            </div>
+            <div class="breadcrumb" id="dirBreadcrumb"></div>
+            <div class="dir-list" id="dirList"></div>
+        </div>
+        <div class="modal-footer">
+            <button class="secondary" id="cancelDirPicker">Cancel</button>
+            <button id="selectDirBtn" disabled>Select</button>
+        </div>
     </div>
-    <div class="modal-body">
-      <div class="search-box">
-        <input type="text" id="dirSearchInput" placeholder="Filter directories..." />
-      </div>
-      <div class="breadcrumb" id="dirBreadcrumb"></div>
-      <div class="dir-list" id="dirList"></div>
-    </div>
-    <div class="modal-footer">
-      <button class="secondary" id="cancelDirPicker">Cancel</button>
-      <button id="selectDirBtn" disabled>Select</button>
-    </div>
-  </div>
 </div>
 
 <script>
-(() => {
-  const tabsEl = document.getElementById('tabs');
-  const projectPanels = document.getElementById('projectPanels');
+    (() => {
+        const tabsEl = document.getElementById('tabs');
+        const projectPanels = document.getElementById('projectPanels');
 
-  let projects = [];
-  let ws;
-  let activeTasks = new Map();
-  let recentTasks = [];
-  let startedAt = Date.now();
-  let dbConnected = false;
+        let projects = [];
+        let ws;
+        let activeTasks = new Map();
+        let recentTasks = [];
+        let startedAt = Date.now();
+        let dbConnected = false;
 
-  // Directory Picker State
-  let dirPickerCallback = null;
-  let currentDirPath = null;
-  let selectedDirPath = null;
-  let allDirEntries = [];
+        // Directory Picker State
+        let dirPickerCallback = null;
+        let currentDirPath = null;
+        let selectedDirPath = null;
+        let allDirEntries = [];
 
-  const dirPickerOverlay = document.getElementById('dirPickerOverlay');
-  const dirBreadcrumb = document.getElementById('dirBreadcrumb');
-  const dirList = document.getElementById('dirList');
-  const dirSearchInput = document.getElementById('dirSearchInput');
-  const selectDirBtn = document.getElementById('selectDirBtn');
-  const closeDirPicker = document.getElementById('closeDirPicker');
-  const cancelDirPicker = document.getElementById('cancelDirPicker');
+        const dirPickerOverlay = document.getElementById('dirPickerOverlay');
+        const dirBreadcrumb = document.getElementById('dirBreadcrumb');
+        const dirList = document.getElementById('dirList');
+        const dirSearchInput = document.getElementById('dirSearchInput');
+        const selectDirBtn = document.getElementById('selectDirBtn');
+        const closeDirPicker = document.getElementById('closeDirPicker');
+        const cancelDirPicker = document.getElementById('cancelDirPicker');
 
-  async function openDirectoryPicker(callback) {
-    dirPickerCallback = callback;
-    selectedDirPath = null;
-    selectDirBtn.disabled = true;
+        async function openDirectoryPicker(callback) {
+            dirPickerCallback = callback;
+            selectedDirPath = null;
+            selectDirBtn.disabled = true;
 
-    // Start at root
-    try {
-      const rootsRes = await fetch('/api/fs/roots');
-      const rootsData = await rootsRes.json();
-      const startPath = rootsData.roots && rootsData.roots.length > 0 ? rootsData.roots[0] : '/';
-      await loadDirectory(startPath);
-      dirPickerOverlay.classList.add('show');
-    } catch (e) {
-      console.error('Failed to open directory picker', e);
-      alert('Failed to access file system');
-    }
-  }
+            // Start at root
+            try {
+                const rootsRes = await fetch('/api/fs/roots');
+                const rootsData = await rootsRes.json();
+                const startPath = rootsData.roots && rootsData.roots.length > 0 ? rootsData.roots[0] : '/';
+                await loadDirectory(startPath);
+                dirPickerOverlay.classList.add('show');
+            } catch (e) {
+                console.error('Failed to open directory picker', e);
+                alert('Failed to access file system');
+            }
+        }
 
-  async function loadDirectory(path) {
-    try {
-      const res = await fetch('/api/fs/list?path=' + encodeURIComponent(path) + '&include_files=false&page_size=500');
-      if (!res.ok) throw new Error('Failed to list directory');
-      const data = await res.json();
+        async function loadDirectory(path) {
+            try {
+                const res = await fetch('/api/fs/list?path=' + encodeURIComponent(path) + '&include_files=false&page_size=500');
+                if (!res.ok) throw new Error('Failed to list directory');
+                const data = await res.json();
 
-      currentDirPath = data.path;
-      allDirEntries = data.entries || [];
+                currentDirPath = data.path;
+                allDirEntries = data.entries || [];
 
-      renderBreadcrumb(data.path, data.separator, data.parent);
-      renderDirList(allDirEntries, data.parent, data.separator);
-    } catch (e) {
-      console.error('Failed to load directory', e);
-      dirList.innerHTML = '<div style="padding:20px;color:var(--muted);text-align:center">Failed to load directory</div>';
-    }
-  }
+                renderBreadcrumb(data.path, data.separator, data.parent);
+                renderDirList(allDirEntries, data.parent, data.separator);
+            } catch (e) {
+                console.error('Failed to load directory', e);
+                dirList.innerHTML = '<div style="padding:20px;color:var(--muted);text-align:center">Failed to load directory</div>';
+            }
+        }
 
-  function renderBreadcrumb(path, separator, parent) {
-    const parts = path.split(separator).filter(p => p);
-    const isWindows = separator === '\\';
+        function renderBreadcrumb(path, separator, parent) {
+            const parts = path.split(separator).filter(p => p);
+            const isWindows = separator === '\\';
 
-    let html = '';
-    if (parent) {
-      html += '<span class="breadcrumb-item" data-path="' + htmlEscape(parent) + '">↑ Up</span>';
-      html += '<span class="breadcrumb-sep">/</span>';
-    }
+            let html = '';
+            if (parent) {
+                html += '<span class="breadcrumb-item" data-path="' + htmlEscape(parent) + '">↑ Up</span>';
+                html += '<span class="breadcrumb-sep">/</span>';
+            }
 
-    let accumulated = isWindows ? '' : '/';
-    parts.forEach((part, idx) => {
-      if (isWindows && idx === 0) {
-        accumulated = part + '\\';
-      } else {
-        accumulated += (isWindows ? '\\' : '/') + part;
-      }
-      html += '<span class="breadcrumb-item" data-path="' + htmlEscape(accumulated) + '">' + htmlEscape(part) + '</span>';
-      if (idx < parts.length - 1) {
-        html += '<span class="breadcrumb-sep">/</span>';
-      }
-    });
+            let accumulated = isWindows ? '' : '/';
+            parts.forEach((part, idx) => {
+                if (isWindows && idx === 0) {
+                    accumulated = part + '\\';
+                } else {
+                    accumulated += (isWindows ? '\\' : '/') + part;
+                }
+                html += '<span class="breadcrumb-item" data-path="' + htmlEscape(accumulated) + '">' + htmlEscape(part) + '</span>';
+                if (idx < parts.length - 1) {
+                    html += '<span class="breadcrumb-sep">/</span>';
+                }
+            });
 
-    dirBreadcrumb.innerHTML = html;
+            dirBreadcrumb.innerHTML = html;
 
-    dirBreadcrumb.querySelectorAll('.breadcrumb-item').forEach(el => {
-      el.addEventListener('click', () => {
-        loadDirectory(el.dataset.path);
-      });
-    });
-  }
+            dirBreadcrumb.querySelectorAll('.breadcrumb-item').forEach(el => {
+                el.addEventListener('click', () => {
+                    loadDirectory(el.dataset.path);
+                });
+            });
+        }
 
-  function renderDirList(entries, parent, separator) {
-    const filter = dirSearchInput.value.toLowerCase();
-    const filtered = entries.filter(e =>
-      e.type === 'dir' && e.name.toLowerCase().includes(filter)
-    );
+        function renderDirList(entries, parent, separator) {
+            const filter = dirSearchInput.value.toLowerCase();
+            const filtered = entries.filter(e =>
+                e.type === 'dir' && e.name.toLowerCase().includes(filter)
+            );
 
-    let html = '';
+            let html = '';
 
-    // Add "up" entry if parent exists
-    if (parent) {
-      html += `
+            // Add "up" entry if parent exists
+            if (parent) {
+                html += `
         <div class="dir-item up" data-path="${htmlEscape(parent)}" data-action="nav">
           <div class="icon">
             <svg viewBox="0 0 24 24"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>
@@ -527,10 +659,10 @@
           <div class="name">.. (parent directory)</div>
         </div>
       `;
-    }
+            }
 
-    filtered.forEach(e => {
-      html += `
+            filtered.forEach(e => {
+                html += `
         <div class="dir-item" data-path="${htmlEscape(e.path)}" data-action="select">
           <div class="icon">
             <svg viewBox="0 0 24 24">
@@ -540,166 +672,172 @@
           <div class="name">${htmlEscape(e.name)}</div>
         </div>
       `;
-    });
+            });
 
-    if (!html) {
-      html = '<div style="padding:20px;color:var(--muted);text-align:center">No directories found</div>';
-    }
+            if (!html) {
+                html = '<div style="padding:20px;color:var(--muted);text-align:center">No directories found</div>';
+            }
 
-    dirList.innerHTML = html;
+            dirList.innerHTML = html;
 
-    dirList.querySelectorAll('.dir-item').forEach(el => {
-      el.addEventListener('click', () => {
-        const path = el.dataset.path;
-        const action = el.dataset.action;
+            dirList.querySelectorAll('.dir-item').forEach(el => {
+                el.addEventListener('click', () => {
+                    const path = el.dataset.path;
+                    const action = el.dataset.action;
 
-        if (action === 'nav') {
-          loadDirectory(path);
-        } else {
-          // Select this directory
-          dirList.querySelectorAll('.dir-item').forEach(i => i.classList.remove('selected'));
-          el.classList.add('selected');
-          selectedDirPath = path;
-          selectDirBtn.disabled = false;
+                    if (action === 'nav') {
+                        loadDirectory(path);
+                    } else {
+                        // Select this directory
+                        dirList.querySelectorAll('.dir-item').forEach(i => i.classList.remove('selected'));
+                        el.classList.add('selected');
+                        selectedDirPath = path;
+                        selectDirBtn.disabled = false;
+                    }
+                });
+
+                el.addEventListener('dblclick', () => {
+                    const path = el.dataset.path;
+                    const action = el.dataset.action;
+                    if (action !== 'nav') {
+                        loadDirectory(path);
+                    }
+                });
+            });
         }
-      });
 
-      el.addEventListener('dblclick', () => {
-        const path = el.dataset.path;
-        const action = el.dataset.action;
-        if (action !== 'nav') {
-          loadDirectory(path);
+        dirSearchInput.addEventListener('input', () => {
+            renderDirList(allDirEntries, null, currentDirPath.includes('\\') ? '\\' : '/');
+        });
+
+        selectDirBtn.addEventListener('click', () => {
+            if (selectedDirPath && dirPickerCallback) {
+                dirPickerCallback(selectedDirPath);
+            }
+            closeDirPickerModal();
+        });
+
+        function closeDirPickerModal() {
+            dirPickerOverlay.classList.remove('show');
+            dirPickerCallback = null;
+            selectedDirPath = null;
+            dirSearchInput.value = '';
         }
-      });
-    });
-  }
 
-  dirSearchInput.addEventListener('input', () => {
-    renderDirList(allDirEntries, null, currentDirPath.includes('\\') ? '\\' : '/');
-  });
+        closeDirPicker.addEventListener('click', closeDirPickerModal);
+        cancelDirPicker.addEventListener('click', closeDirPickerModal);
 
-  selectDirBtn.addEventListener('click', () => {
-    if (selectedDirPath && dirPickerCallback) {
-      dirPickerCallback(selectedDirPath);
-    }
-    closeDirPickerModal();
-  });
-
-  function closeDirPickerModal() {
-    dirPickerOverlay.classList.remove('show');
-    dirPickerCallback = null;
-    selectedDirPath = null;
-    dirSearchInput.value = '';
-  }
-
-  closeDirPicker.addEventListener('click', closeDirPickerModal);
-  cancelDirPicker.addEventListener('click', closeDirPickerModal);
-
-  dirPickerOverlay.addEventListener('click', (e) => {
-    if (e.target === dirPickerOverlay) {
-      closeDirPickerModal();
-    }
-  });
+        dirPickerOverlay.addEventListener('click', (e) => {
+            if (e.target === dirPickerOverlay) {
+                closeDirPickerModal();
+            }
+        });
 
 
-  function switchTab(tabId) {
-    Array.from(tabsEl.children).forEach(t => t.classList.remove('active'));
-    document.querySelectorAll('.panel').forEach(p => p.style.display = 'none');
-    const tab = Array.from(tabsEl.children).find(t => t.dataset.tab === tabId);
-    if (tab) tab.classList.add('active');
-    const panel = document.getElementById('panel-' + tabId);
-    if (panel) panel.style.display = 'block';
-  }
+        function switchTab(tabId) {
+            Array.from(tabsEl.children).forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.panel').forEach(p => p.style.display = 'none');
+            const tab = Array.from(tabsEl.children).find(t => t.dataset.tab === tabId);
+            if (tab) tab.classList.add('active');
+            const panel = document.getElementById('panel-' + tabId);
+            if (panel) panel.style.display = 'block';
+        }
 
-  tabsEl.addEventListener('click', (e) => {
-    const t = e.target.closest('.tab');
-    if (!t) return;
-    switchTab(t.dataset.tab);
-  });
+        tabsEl.addEventListener('click', (e) => {
+            const t = e.target.closest('.tab');
+            if (!t) return;
+            switchTab(t.dataset.tab);
+        });
 
-  function htmlEscape(s){
-    return ('' + s).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
-  }
+        function htmlEscape(s) {
+            return ('' + s).replace(/[&<>"']/g, m => ({
+                '&': '&amp;',
+                '<': '&lt;',
+                '>': '&gt;',
+                '"': '&quot;',
+                "'": '&#39;'
+            }[m]));
+        }
 
-  async function refreshHealth() {
-    try {
-      const projRes = await fetch('/api/projects');
-      const projData = await projRes.json();
-      projects = Array.isArray(projData) ? projData : [];
-      renderProjects();
-      renderSystemProjects();
+        async function refreshHealth() {
+            try {
+                const projRes = await fetch('/api/projects');
+                const projData = await projRes.json();
+                projects = Array.isArray(projData) ? projData : [];
+                renderProjects();
+                renderSystemProjects();
 
-      dbConnected = true;
-      const upSeconds = Math.floor((Date.now() - startedAt)/1000);
-      const mem = navigator.deviceMemory ? (navigator.deviceMemory + ' GB (approx)') : 'N/A';
-      const healthEl = document.getElementById('serverHealth');
-      healthEl.innerHTML = `
+                dbConnected = true;
+                const upSeconds = Math.floor((Date.now() - startedAt) / 1000);
+                const mem = navigator.deviceMemory ? (navigator.deviceMemory + ' GB (approx)') : 'N/A';
+                const healthEl = document.getElementById('serverHealth');
+                healthEl.innerHTML = `
         <div>DB Connected: <b>${dbConnected ? 'Yes' : 'No'}</b></div>
         <div>Uptime: <b>${upSeconds}s</b></div>
         <div>Client Memory (approx): <b>${mem}</b></div>
         <div>Load: <span class="muted">Client-side approximation only</span></div>
       `;
 
-      const sysEl = document.getElementById('systemStatus');
-      if (sysEl) {
-        sysEl.innerHTML = `
+                const sysEl = document.getElementById('systemStatus');
+                if (sysEl) {
+                    sysEl.innerHTML = `
           <div>DB Connected: <b>${dbConnected ? 'Yes' : 'No'}</b></div>
           <div>Uptime: <b>${upSeconds}s</b></div>
           <div>Client Memory (approx): <b>${mem}</b></div>
           <div>Load: <span class="muted">Client-side approximation only</span></div>
         `;
-      }
+                }
 
-      renderProjectTabsAndPanels();
-      projects.forEach(loadProjectDocuments);
-    } catch (e) {
-      console.error(e);
-    }
-  }
+                renderProjectTabsAndPanels();
+                projects.forEach(loadProjectDocuments);
+            } catch (e) {
+                console.error(e);
+            }
+        }
 
-  function renderProjects() {
-    const listEl = document.getElementById('projectsList');
-    if (!projects.length) {
-      listEl.textContent = 'No projects found.';
-      return;
-    }
-    const pills = projects.map(p => `<span class="pill">${htmlEscape(p.name)}</span>`).join(' ');
-    listEl.innerHTML = `
+        function renderProjects() {
+            const listEl = document.getElementById('projectsList');
+            if (!projects.length) {
+                listEl.textContent = 'No projects found.';
+                return;
+            }
+            const pills = projects.map(p => `<span class="pill">${htmlEscape(p.name)}</span>`).join(' ');
+            listEl.innerHTML = `
       <div>Total: ${projects.length}</div>
       <div>${pills}</div>
     `;
-  }
+        }
 
-  function renderSystemProjects() {
-    const el = document.getElementById('systemProjects');
-    if (!el) return;
-    if (!projects.length) {
-      el.textContent = 'No projects tracked.';
-      return;
-    }
-    const names = projects.map(p => htmlEscape(p.name)).join(', ');
-    el.innerHTML = `
+        function renderSystemProjects() {
+            const el = document.getElementById('systemProjects');
+            if (!el) return;
+            if (!projects.length) {
+                el.textContent = 'No projects tracked.';
+                return;
+            }
+            const names = projects.map(p => htmlEscape(p.name)).join(', ');
+            el.innerHTML = `
       <div>Count: <b>${projects.length}</b></div>
       <div>Names: ${names}</div>
     `;
-  }
+        }
 
-  function ensureProjectTab(project) {
-    const tabId = 'proj-' + project.project_id;
-    if (!Array.from(tabsEl.children).some(t => t.dataset.tab === tabId)) {
-      const tab = document.createElement('div');
-      tab.className = 'tab';
-      tab.dataset.tab = tabId;
-      tab.textContent = project.name;
-      tabsEl.appendChild(tab);
-    }
-    const panelId = 'panel-' + tabId;
-    if (!document.getElementById(panelId)) {
-      const panel = document.createElement('div');
-      panel.className = 'panel';
-      panel.id = panelId;
-      panel.style.display = 'none';
-      panel.innerHTML = `
+        function ensureProjectTab(project) {
+            const tabId = 'proj-' + project.project_id;
+            if (!Array.from(tabsEl.children).some(t => t.dataset.tab === tabId)) {
+                const tab = document.createElement('div');
+                tab.className = 'tab';
+                tab.dataset.tab = tabId;
+                tab.textContent = project.name;
+                tabsEl.appendChild(tab);
+            }
+            const panelId = 'panel-' + tabId;
+            if (!document.getElementById(panelId)) {
+                const panel = document.createElement('div');
+                panel.className = 'panel';
+                panel.id = panelId;
+                panel.style.display = 'none';
+                panel.innerHTML = `
         <div class="grid">
           <div class="card">
             <h3>Source Roots</h3>
@@ -707,13 +845,16 @@
             <div class="row source-root-row" style="margin-top:8px">
               <input class="root-input" type="text" id="newRoot-${project.project_id}" placeholder="Add new source root..." />
               <div class="actions">
-                <button id="addRootBtn-${project.project_id}" disabled>Add</button>
                 <button class="icon-btn" id="pickFolderBtn-${project.project_id}" title="Choose folder">
                   <svg viewBox="0 0 24 24" aria-hidden="true">
                     <path d="M10 4l2 2h6a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h4zm9 4H5v8c0 .55.45 1 1 1h12c.55 0 1-.45 1-1V8z"/>
                   </svg>
                 </button>
+                <button id="addRootBtn-${project.project_id}" disabled>Add</button>
               </div>
+            <div class="row" style="margin-top:12px">
+              <button class="secondary" onclick="window.__deleteProject('${project.project_id}')">Delete Project</button>
+            </div>
             </div>
           </div>
           <div class="card">
@@ -724,210 +865,212 @@
             </table>
           </div>
         </div>
-        <div class="row" style="margin-top:12px">
-          <button class="secondary" onclick="window.__deleteProject('${project.project_id}')">Delete Project</button>
-        </div>
       `;
-      projectPanels.appendChild(panel);
+                projectPanels.appendChild(panel);
 
-      const addBtn = panel.querySelector('#addRootBtn-' + project.project_id);
-      const pickBtn = panel.querySelector('#pickFolderBtn-' + project.project_id);
-      const textInput = panel.querySelector('#newRoot-' + project.project_id);
+                const addBtn = panel.querySelector('#addRootBtn-' + project.project_id);
+                const pickBtn = panel.querySelector('#pickFolderBtn-' + project.project_id);
+                const textInput = panel.querySelector('#newRoot-' + project.project_id);
 
-      const syncAddState = () => { addBtn.disabled = !(textInput.value || '').trim(); };
-      textInput.addEventListener('input', syncAddState);
-      syncAddState();
+                const syncAddState = () => {
+                    addBtn.disabled = !(textInput.value || '').trim();
+                };
+                textInput.addEventListener('input', syncAddState);
+                syncAddState();
 
-      addBtn.addEventListener('click', async () => {
-        await addRoot(project.project_id);
-      });
+                addBtn.addEventListener('click', async () => {
+                    await addRoot(project.project_id);
+                });
 
-      // Open custom directory picker
-      pickBtn.addEventListener('click', () => {
-        openDirectoryPicker((path) => {
-          textInput.value = path;
-          syncAddState();
-        });
-      });
-    }
-    const rootsSel = document.getElementById('roots-' + project.project_id);
-    rootsSel.innerHTML = '';
-    (project.source_roots || []).forEach(r => {
-      const opt = document.createElement('option');
-      opt.textContent = r;
-      opt.value = r;
-      rootsSel.appendChild(opt);
-    });
-  }
-
-  function renderProjectTabsAndPanels() {
-    projects.forEach(ensureProjectTab);
-  }
-
-  async function loadProjectDocuments(project) {
-    try {
-      const tbody = document.querySelector('#docs-' + project.project_id + ' tbody');
-      if (tbody) tbody.innerHTML = '';
-      // Trigger server to list documents; results will arrive via WebSocket as task_completed for ListDocumentsTask
-      await fetch('/api/projects/' + encodeURIComponent(project.project_id) + '/documents');
-    } catch (e) {
-      console.error('Failed to load project documents', e);
-    }
-  }
-
-  function renderActiveTasks() {
-    const tbody = document.querySelector('#activeTasksTable tbody');
-    tbody.innerHTML = '';
-    Array.from(activeTasks.values()).forEach(row => {
-      const tr = document.createElement('tr');
-      tr.innerHTML = `
-        <td>${htmlEscape(row.request_id)}</td>
-        <td>${htmlEscape(row.project_id || '')}</td>
-        <td>${htmlEscape(row.task_type || '')}</td>
-        <td>${htmlEscape(row.status || '')}</td>
-        <td>${new Date().toLocaleTimeString()}</td>
-      `;
-      tbody.appendChild(tr);
-    });
-  }
-
-  function renderRecentTasks() {
-    const tbody = document.querySelector('#recentTasksTable tbody');
-    tbody.innerHTML = '';
-    recentTasks.slice(-50).reverse().forEach(row => {
-      const tr = document.createElement('tr');
-      tr.innerHTML = `
-        <td>${htmlEscape(row.request_id)}</td>
-        <td>${htmlEscape(row.project_id || '')}</td>
-        <td>${htmlEscape(row.task_type || '')}</td>
-        <td>${htmlEscape(row.status || '')}</td>
-        <td>${new Date().toLocaleTimeString()}</td>
-      `;
-      tbody.appendChild(tr);
-    });
-  }
-
-  async function createProject() {
-    const name = document.getElementById('newProjectName').value.trim();
-    if (!name) return;
-    const res = await fetch('/api/projects', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, source_roots: [], args: {} })
-    });
-    if (res.ok) {
-      await refreshHealth();
-      document.getElementById('newProjectName').value = '';
-    }
-  }
-
-  async function deleteProject(project_id) {
-    const res = await fetch('/api/projects/' + encodeURIComponent(project_id), { method: 'DELETE' });
-    if (res.ok) {
-      const tab = Array.from(tabsEl.children).find(t => t.dataset.tab === ('proj-' + project_id));
-      if (tab) tabsEl.removeChild(tab);
-      const panel = document.getElementById('panel-proj-' + project_id);
-      if (panel) panel.remove();
-      await refreshHealth();
-      switchTab('main');
-    }
-  }
-
-  async function addRoot(project_id) {
-    const inp = document.getElementById('newRoot-' + project_id);
-    const val = (inp.value || '').trim();
-    if (!val) return;
-    const proj = projects.find(p => p.project_id === project_id);
-    if (!proj) return;
-    const roots = Array.from(new Set([...(proj.source_roots || []), val]));
-    const res = await fetch('/api/projects/' + encodeURIComponent(project_id), {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ source_roots: roots })
-    });
-    if (res.ok) {
-      inp.value = '';
-      await refreshHealth();
-    }
-  }
-
-  async function removeSelectedRoot(project_id) {
-    const sel = document.getElementById('roots-' + project_id);
-    const toRemove = Array.from(sel.selectedOptions).map(o => o.value);
-    const proj = projects.find(p => p.project_id === project_id);
-    if (!proj) return;
-    const roots = (proj.source_roots || []).filter(r => !toRemove.includes(r));
-    const res = await fetch('/api/projects/' + encodeURIComponent(project_id), {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ source_roots: roots })
-    });
-    if (res.ok) {
-      await refreshHealth();
-    }
-  }
-
-  window.__addRoot = addRoot;
-  window.__removeSelectedRoot = removeSelectedRoot;
-  window.__deleteProject = deleteProject;
-
-  document.getElementById('createProjectBtn').addEventListener('click', createProject);
-
-  function connectWS() {
-    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    ws = new WebSocket(`${proto}://${location.host}/ws/events`);
-    ws.onopen = () => console.log('WS connected');
-    ws.onmessage = (evt) => {
-      try {
-        const msg = JSON.parse(evt.data);
-        const t = msg.type;
-        if (!t) return;
-        const reqId = msg.request_id || msg.requestId || 'n/a';
-        const row = {
-          request_id: reqId,
-          project_id: (msg.task_info && msg.task_info.project_id) || msg.project_id || '',
-          task_type: msg.task_type || (msg.task_info && msg.task_info.task_type) || '',
-          status: t
-        };
-        if (t === 'task_enqueued' || t === 'task_started') {
-          activeTasks.set(reqId, row);
-        } else if (t === 'task_completed' || t === 'task_failed' || t === 'task_cancelled') {
-          activeTasks.delete(reqId);
-          recentTasks.push(row);
-        }
-        // Handle document list response from ListDocumentsTask
-        if (t === 'task_completed' && (row.task_type === 'ListDocumentsTask')) {
-          const pid = row.project_id;
-          if (pid) {
-            const result = msg.result || {};
-            const docs = Array.isArray(result.documentStore) ? result.documentStore : [];
-            const tbody = document.querySelector('#docs-' + pid + ' tbody');
-            if (tbody) {
-              if (!docs.length) {
-                tbody.innerHTML = '<tr><td class="muted">No ingested documents found</td></tr>';
-              } else {
-                const unique = Array.from(new Set(docs)).sort((a,b) => a.localeCompare(b));
-                tbody.innerHTML = unique.map(p => '<tr><td>' + htmlEscape(p) + '</td></tr>').join('');
-              }
+                // Open custom directory picker
+                pickBtn.addEventListener('click', () => {
+                    openDirectoryPicker((path) => {
+                        textInput.value = path;
+                        syncAddState();
+                    });
+                });
             }
-          }
+            const rootsSel = document.getElementById('roots-' + project.project_id);
+            rootsSel.innerHTML = '';
+            (project.source_roots || []).forEach(r => {
+                const opt = document.createElement('option');
+                opt.textContent = r;
+                opt.value = r;
+                rootsSel.appendChild(opt);
+            });
         }
-        renderActiveTasks();
-        renderRecentTasks();
-      } catch (e) {
-        console.warn('WS message parse error', e);
-      }
-    };
-    ws.onclose = () => {
-      console.log('WS closed, retrying in 2s');
-      setTimeout(connectWS, 2000);
-    };
-  }
 
-  refreshHealth();
-  connectWS();
-  setInterval(refreshHealth, 10000);
-})();
+        function renderProjectTabsAndPanels() {
+            projects.forEach(ensureProjectTab);
+        }
+
+        async function loadProjectDocuments(project) {
+            try {
+                // Don't clear the tbody here - let the WebSocket response handle the update
+                // This prevents the jarring "erase everything" behavior
+                // const tbody = document.querySelector('#docs-' + project.project_id + ' tbody');
+                // if (tbody) tbody.innerHTML = '';
+
+                // Trigger server to list documents; results will arrive via WebSocket as task_completed for ListDocumentsTask
+                await fetch('/api/projects/' + encodeURIComponent(project.project_id) + '/documents');
+            } catch (e) {
+                console.error('Failed to load project documents', e);
+            }
+        }
+
+        function renderActiveTasks() {
+            const tbody = document.querySelector('#activeTasksTable tbody');
+            tbody.innerHTML = '';
+            Array.from(activeTasks.values()).forEach(row => {
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+        <td>${htmlEscape(row.request_id)}</td>
+        <td>${htmlEscape(row.project_id || '')}</td>
+        <td>${htmlEscape(row.task_type || '')}</td>
+        <td>${htmlEscape(row.status || '')}</td>
+        <td>${new Date().toLocaleTimeString()}</td>
+      `;
+                tbody.appendChild(tr);
+            });
+        }
+
+        function renderRecentTasks() {
+            const tbody = document.querySelector('#recentTasksTable tbody');
+            tbody.innerHTML = '';
+            recentTasks.slice(-50).reverse().forEach(row => {
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+        <td>${htmlEscape(row.request_id)}</td>
+        <td>${htmlEscape(row.project_id || '')}</td>
+        <td>${htmlEscape(row.task_type || '')}</td>
+        <td>${htmlEscape(row.status || '')}</td>
+        <td>${new Date().toLocaleTimeString()}</td>
+      `;
+                tbody.appendChild(tr);
+            });
+        }
+
+        async function createProject() {
+            const name = document.getElementById('newProjectName').value.trim();
+            if (!name) return;
+            const res = await fetch('/api/projects', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({name, source_roots: [], args: {}})
+            });
+            if (res.ok) {
+                await refreshHealth();
+                document.getElementById('newProjectName').value = '';
+            }
+        }
+
+        async function deleteProject(project_id) {
+            const res = await fetch('/api/projects/' + encodeURIComponent(project_id), {method: 'DELETE'});
+            if (res.ok) {
+                const tab = Array.from(tabsEl.children).find(t => t.dataset.tab === ('proj-' + project_id));
+                if (tab) tabsEl.removeChild(tab);
+                const panel = document.getElementById('panel-proj-' + project_id);
+                if (panel) panel.remove();
+                await refreshHealth();
+                switchTab('main');
+            }
+        }
+
+        async function addRoot(project_id) {
+            const inp = document.getElementById('newRoot-' + project_id);
+            const val = (inp.value || '').trim();
+            if (!val) return;
+            const proj = projects.find(p => p.project_id === project_id);
+            if (!proj) return;
+            const roots = Array.from(new Set([...(proj.source_roots || []), val]));
+            const res = await fetch('/api/projects/' + encodeURIComponent(project_id), {
+                method: 'PATCH',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({source_roots: roots})
+            });
+            if (res.ok) {
+                inp.value = '';
+                await refreshHealth();
+            }
+        }
+
+        async function removeSelectedRoot(project_id) {
+            const sel = document.getElementById('roots-' + project_id);
+            const toRemove = Array.from(sel.selectedOptions).map(o => o.value);
+            const proj = projects.find(p => p.project_id === project_id);
+            if (!proj) return;
+            const roots = (proj.source_roots || []).filter(r => !toRemove.includes(r));
+            const res = await fetch('/api/projects/' + encodeURIComponent(project_id), {
+                method: 'PATCH',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({source_roots: roots})
+            });
+            if (res.ok) {
+                await refreshHealth();
+            }
+        }
+
+        window.__addRoot = addRoot;
+        window.__removeSelectedRoot = removeSelectedRoot;
+        window.__deleteProject = deleteProject;
+
+        document.getElementById('createProjectBtn').addEventListener('click', createProject);
+
+        function connectWS() {
+            const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+            ws = new WebSocket(`${proto}://${location.host}/ws/events`);
+            ws.onopen = () => console.log('WS connected');
+            ws.onmessage = (evt) => {
+                try {
+                    const msg = JSON.parse(evt.data);
+                    const t = msg.type;
+                    if (!t) return;
+                    const reqId = msg.request_id || msg.requestId || 'n/a';
+                    const row = {
+                        request_id: reqId,
+                        project_id: (msg.task_info && msg.task_info.project_id) || msg.project_id || '',
+                        task_type: msg.task_type || (msg.task_info && msg.task_info.task_type) || '',
+                        status: t
+                    };
+                    if (t === 'task_enqueued' || t === 'task_started') {
+                        activeTasks.set(reqId, row);
+                    } else if (t === 'task_completed' || t === 'task_failed' || t === 'task_cancelled') {
+                        activeTasks.delete(reqId);
+                        recentTasks.push(row);
+                    }
+                    // Handle document list response from ListDocumentsTask
+                    if (t === 'task_completed' && (row.task_type === 'ListDocumentsTask')) {
+                        const pid = row.project_id;
+                        if (pid) {
+                            const result = msg.result || {};
+                            const docs = Array.isArray(result.documentStore) ? result.documentStore : [];
+                            const tbody = document.querySelector('#docs-' + pid + ' tbody');
+                            if (tbody) {
+                                if (!docs.length) {
+                                    tbody.innerHTML = '<tr><td class="muted">No ingested documents found</td></tr>';
+                                } else {
+                                    const unique = Array.from(new Set(docs)).sort((a, b) => a.localeCompare(b));
+                                    tbody.innerHTML = unique.map(p => '<tr><td>' + htmlEscape(p) + '</td></tr>').join('');
+                                }
+                            }
+                        }
+                    }
+                    renderActiveTasks();
+                    renderRecentTasks();
+                } catch (e) {
+                    console.warn('WS message parse error', e);
+                }
+            };
+            ws.onclose = () => {
+                console.log('WS closed, retrying in 2s');
+                setTimeout(connectWS, 2000);
+            };
+        }
+
+        refreshHealth();
+        connectWS();
+        setInterval(refreshHealth, 10000);
+    })();
 </script>
 </body>
 </html>
