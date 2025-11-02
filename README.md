@@ -28,6 +28,8 @@ When you ask questions about your code, the system:
 
 ## Prerequisites
 
+Requires Python 3.13+.
+
 ### 1. Neo4j Database
 
 Install and run Neo4j:
@@ -104,16 +106,34 @@ The server will:
 ## Usage
 
 ### Simple Query (Recommended)
+
 ```python 
-import asyncio from client.client import simple_query
-async def main(): result = await simple_query("What does this code do?") if result["success"]: print(result["result"]) else: print(f"Error: {result['error']}")
+import asyncio
+from client.client_cli.client import simple_query
+
+
+async def main(): result = await simple_query("What does this code do?")
+
+
+if result["success"]:
+    print(result["result"]) else:
+    print(f"Error: {result['error']}")
 asyncio.run(main())
 ``` 
 
 ### Advanced Usage with Status Callbacks
+
 ```python
-import asyncio from client.client import GraphRagClient
-async def main(): client = GraphRagClient() await client.connect()
+import asyncio
+from client.client_cli.client import GraphRagClient
+
+
+async def main(): client = GraphRagClient()
+
+
+await client.connect()
+
+
 def on_query_update(message):
     if message.get("type") == "task_started":
         print("🔄 Processing your query...")
@@ -123,6 +143,7 @@ def on_query_update(message):
         print(f"Answer: {result}")
     elif message.get("type") == "task_failed":
         print(f"❌ Query failed: {message.get('error')}")
+
 
 request_id = await client.query("Explain this codebase", on_query_update)
 print(f"Submitted query with ID: {request_id}")

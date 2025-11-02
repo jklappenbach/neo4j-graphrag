@@ -1,11 +1,13 @@
 
 """Unit tests for TaskDAO component."""
+from unittest.mock import patch
+
 import pytest
-from typing import Any, Dict, List, Optional
-from unittest.mock import Mock, MagicMock, patch
-from server.task_dao import TaskDAO
+
 from server.server_defines import TaskStatus
+from server.task_dao import TaskDAO
 from server.tests.neo4j_mocks import MockResult
+
 
 class MockSession:
     def __init__(self):

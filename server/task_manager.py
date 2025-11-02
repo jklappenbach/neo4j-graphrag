@@ -3,35 +3,52 @@ import json
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from typing import Awaitable
 from typing import Optional, Dict, Any, Callable, List
 from typing import Tuple, LiteralString
 
 import neo4j
+from charset_normalizer.cli import query_yes_no
 from neo4j import Record
-from watchdog.events import FileSystemEvent
 
-from server.server_defines import Task, TaskManager, FileEventType
+from server.server_defines import Task, TaskManager, FileEventType, WebSocketManager, TaskListener
 from server.task_dao import TaskDAO
 
 logger = logging.getLogger(__name__)
 
 
 class FileTask(Task):
-    def __init__(self, request_id: str, project_id: str, file_system_event: FileSystemEvent,
+    def __init__(self, request_id: str, project_id: str, src_path: str, dest_path: str, is_directory: bool,
                  event_type: FileEventType,
-                 handler: Callable[[FileSystemEvent], bool],
-                 task_mgr: TaskManager) -> None:
-        super().__init__(request_id, project_id, task_mgr)
-        self._event = file_system_event
+                 handler: Callable[[str, str, str, str], None], listener: TaskListener) -> None:
+        super().__init__(request_id, project_id, listener)
         self._event_type = event_type
         self._handler = handler
+        self._src_path = src_path
+        self._dest_path = dest_path
+        self._is_directory = is_directory
 
     @classmethod
     def from_record(cls, record: Record) -> Task:
         """Create a FileTask instance from a database record."""
         # Create base task from record
-        instance = cls.from_record(record)
+        base = Task.from_record(record)  # use base class to avoid recursion
+
+        # Build a new FileTask without calling __init__ directly
+        instance: Task = cls.__new__(cls)  # type: ignore
+        # Copy base Task fields
+        instance._request_id = base._request_id
+        instance._project_id = base._project_id
+        instance._task_mgr = base._task_mgr
+        instance._task_status = base._task_status
+        instance._created_at = base._created_at
+        instance._started_at = base._started_at
+        instance._completed_at = base._completed_at
+        instance._result = base._result
+        instance._error = base._error
+        instance._is_finished = base._is_finished
+        instance._is_cancelled = base._is_cancelled
+        instance._total_time = base._total_time
+        instance._execution_time = base._execution_time
 
         # Set FileTask-specific fields from record
         instance._event_type = FileEventType(record.get("event_type"))
@@ -39,7 +56,6 @@ class FileTask(Task):
         instance._dest_path = record.get("dest_path")
         instance._is_directory = record.get("is_directory")
         instance._handler = None  # Cannot reconstruct handler from DB
-        instance._event = None  # Cannot reconstruct event from DB
 
         return instance
 
@@ -50,15 +66,16 @@ class FileTask(Task):
         if self._is_cancelled:
             return
         try:
-            if self._task_mgr:
-                self._task_mgr.start_task(self._request_id)
-            if self._handler and self._event:
-                self._handler(self._event)
-            if self._task_mgr:
-                self._task_mgr.complete_task(self._request_id, {})
+            if self._is_cancelled:
+                return
+            self._listener.start_task({'task': self})
+            if self._handler:
+                self._handler(self._request_id, self._project_id, self._src_path, self._dest_path)
+            if self._listener:
+                self._listener.complete_task({'task': self})
         except Exception as e:
-            if self._task_mgr:
-                self._task_mgr.fail_task(self._request_id, str(e))
+            if self._listener:
+                self._listener.fail_task({'task': self, 'error': str(e)})
 
     def get_create_cypher(self) -> Tuple[LiteralString, Dict[str, Any]]:
         """Create a FileEventStatus record in Neo4j."""
@@ -86,9 +103,9 @@ class FileTask(Task):
             "project_id": self._project_id,
             "task_type": self.get_task_type(),
             "event_type": self._event_type.value,
-            "src_path": self._event.src_path if self._event else self._src_path,
-            "dest_path": self._event.dest_path if self._event else self._dest_path,
-            "is_directory": self._event.is_directory if self._event else self._is_directory,
+            "src_path": self._src_path,
+            "dest_path": self._dest_path,
+            "is_directory": self._is_directory,
             "status": self._task_status.value,
             "created_at": self._created_at,
             "started_at": self._started_at,
@@ -122,9 +139,9 @@ class FileTask(Task):
             "project_id": self._project_id,
             "task_type": self.get_task_type(),
             "event_type": self._event_type.value,
-            "src_path": self._event.src_path if self._event else self._src_path,
-            "dest_path": self._event.dest_path if self._event else self._dest_path,
-            "is_directory": self._event.is_directory if self._event else self._is_directory,
+            "src_path": self._src_path,
+            "dest_path": self._dest_path,
+            "is_directory": self._is_directory,
             "status": self._task_status.value,
             "created_at": self._created_at,
             "started_at": self._started_at,
@@ -138,18 +155,17 @@ class FileTask(Task):
     def to_dict(self) -> Dict[str, Any]:
         """Convert the record to a dictionary for serialization."""
         result = super().to_dict()
-        result["event_type"] = self._event_type.value if hasattr(self, '_event_type') else None
-        result["src_path"] = self._event.src_path if self._event else getattr(self, '_src_path', None)
-        result["dest_path"] = self._event.dest_path if self._event else getattr(self, '_dest_path', None)
-        result["is_directory"] = self._event.is_directory if self._event else getattr(self, '_is_directory', None)
+        result["event_type"] = self._event_type
+        result["src_path"] = self._src_path
+        result["dest_path"] = self._dest_path
+        result["is_directory"] = self._is_directory
         return result
 
 
 class QueryTask(Task):
     def __init__(self, request_id: str, project_id: str, query: str, args: Dict[str, Any],
-                 handler: Callable[[str, str, str, Dict[str, Any]], Dict[str, Any]],
-                 task_mgr: TaskManager) -> None:
-        super().__init__(request_id, project_id, task_mgr)
+                 handler: Callable[[str, str, str, Dict[str, Any]], Dict[str, Any]], listener: TaskListener) -> None:
+        super().__init__(request_id, project_id, listener)
         self._query = query
         self._handler = handler
         self._temperature = args.get('temperature', 1)
@@ -158,7 +174,7 @@ class QueryTask(Task):
         self._query_prefix = args.get('query_prefix', 'default')
 
     @classmethod
-    def from_record(cls, record: Record) -> 'QueryTask':
+    def from_record(cls, record: Record) -> Task:
         """Create a QueryTask instance from a database record."""
         instance = cls.from_record(record)
 
@@ -175,12 +191,14 @@ class QueryTask(Task):
         if self._is_cancelled:
             return
         try:
-            self._task_mgr.start_task(self._request_id)
-            query_result = self._handler(self._request_id, self._query)
-            if self._task_mgr:
-                self._task_mgr.complete_task(self._request_id, query_result)
+            query_result = {}
+            self._listener.start_task({'task': self})
+            if self._handler:
+                query_result = self._handler(self._request_id, self._query)
+            if self._listener:
+                self._listener.complete_task({'task': self, 'results': query_result})
         except Exception as e:
-            self._task_mgr.fail_task(self._request_id, str(e))
+            self._listener.fail_task(self._request_id, str(e))
 
     def get_create_cypher(self) -> tuple[str, Dict[str, str | float | None]]:
         query = """
@@ -193,7 +211,6 @@ class QueryTask(Task):
             created_at: $created_at,
             started_at: $started_at,
             completed_at: $completed_at,
-            result: $result,
             error: $error
         })
         RETURN q.request_id as request_id
@@ -208,7 +225,6 @@ class QueryTask(Task):
             "created_at": self._created_at,
             "started_at": self._started_at,
             "completed_at": self._completed_at,
-            "result": json.dumps(self._result) if self._result else None,
             "error": self._error
         }
         return query, parameters
@@ -253,13 +269,12 @@ class QueryTask(Task):
 class RefreshTask(Task):
     def __init__(self, request_id: str,
                  project_id: str,
-                 handler: Callable[[str], None],
-                 task_mgr: TaskManager) -> None:
-        super().__init__(request_id, project_id, task_mgr)
+                 handler: Callable[[str, str], Dict[str, Any]], listener: TaskListener) -> None:
+        super().__init__(request_id, project_id, listener)
         self._handler = handler
 
     @classmethod
-    def from_record(cls, record: Record) -> 'RefreshTask':
+    def from_record(cls, record: Record) -> Task:
         """Create a RefreshTask instance from a database record."""
         instance = cls.from_record(record)
 
@@ -272,15 +287,13 @@ class RefreshTask(Task):
         if self._is_cancelled:
             return
         try:
-            if self._task_mgr:
-                self._task_mgr.start_task(self._request_id)
+            self._listener.start_task({'task': self})
             if self._handler:
-                self._handler(self)
-            if self._task_mgr:
-                self._task_mgr.complete_task(self._request_id, {})
+                self._handler(self._request_id, self._project_id)
+            self._listener.complete_task({'task': self})
         except Exception as e:
-            if self._task_mgr:
-                self._task_mgr.fail_task(self._request_id, str(e))
+            if self._listener:
+                self._listener.fail_task({'task': self, 'error': str(e)})
 
     def get_task_type(self) -> str:
         return "RefreshTask"
@@ -318,12 +331,10 @@ class RefreshTask(Task):
         query: LiteralString = """
         MATCH (f:ProcessingStatus:RefreshTask {request_id: $request_id})
         SET f.task_type = $task_type,
-            f.query = $query,
             f.status = $status,
             f.created_at = $created_at,
             f.started_at = $started_at,
             f.completed_at = $completed_at,
-            f.result = $result,
             f.error = $error
         RETURN f.request_id as request_id
         """
@@ -335,7 +346,6 @@ class RefreshTask(Task):
             "created_at": self._created_at,
             "started_at": self._started_at,
             "completed_at": self._completed_at,
-            "result": json.dumps(self._result) if self._result else None,
             "error": self._error
         }
 
@@ -344,13 +354,12 @@ class RefreshTask(Task):
 
 class ListDocumentsTask(Task):
     def __init__(self, request_id: str, project_id: str,
-                 handler: Callable[[str], Dict[str, Any]],
-                 task_mgr: TaskManager) -> None:
-        super().__init__(request_id, project_id, task_mgr)
+                 handler: Callable[[str, str], Dict[str, Any]], listener: TaskListener) -> None:
+        super().__init__(request_id, project_id, listener)
         self._handler = handler
 
     @classmethod
-    def from_record(cls, record: Record) -> 'ListDocumentsTask':
+    def from_record(cls, record: Record) -> Task:
         """Create a ListDocumentsTask instance from a database record."""
         instance = cls.from_record(record)
 
@@ -363,15 +372,12 @@ class ListDocumentsTask(Task):
         if self._is_cancelled:
             return
         try:
-            if self._task_mgr:
-                self._task_mgr.start_task(self._request_id)
-            if self._handler:
-                result = self._handler(self._request_id)
-                if self._task_mgr:
-                    self._task_mgr.complete_task(self._request_id, result)
+            self._listener.start_task({'task': self})
+            result = self._handler(self._request_id, self._project_id)
+            self._listener.complete_task({'task': self, 'result': result})
         except Exception as e:
-            if self._task_mgr:
-                self._task_mgr.fail_task(self._request_id, str(e))
+            if self._listener:
+                self._listener.fail_task({'task': self, 'error': str(e)})
 
     def get_task_type(self) -> str:
         return "ListDocumentsTask"
@@ -409,7 +415,6 @@ class ListDocumentsTask(Task):
         query: LiteralString = """
         MATCH (f:ProcessingStatus:ListTask {request_id: $request_id})
         SET f.task_type = $task_type,
-            f.query = $query,
             f.status = $status,
             f.created_at = $created_at,
             f.started_at = $started_at,
@@ -454,59 +459,37 @@ class TaskFactory:
 class TaskManagerImpl(TaskManager):
 
     def __init__(self, driver: neo4j.Driver,
-                 websocket_notifier: Callable[[str, Dict[str, Any]], Awaitable[None]] | Awaitable[None] | None):
+                 websocket_manager: WebSocketManager):
         self._records: Dict[str, Task] = {}
         self._dao = TaskDAO(driver)
         self._thread_pool = ThreadPoolExecutor(max_workers=1)
         self._lock = threading.RLock()
-        # Normalize notifier to a callable coroutine function
-        self._websocket_notifier = self._normalize_notifier(websocket_notifier)
-
-    def _normalize_notifier(self, notifier):
-        """
-        Accepts:
-          - async function (callable returning coroutine)
-          - bound coroutine function
-          - already created coroutine (rare in tests)
-          - None
-        Returns a callable async function notifier(request_id, payload) -> None
-        """
-        if notifier is None:
-            return None
-
-        # If it's a coroutine object (already awaited later would error), wrap it
-        if asyncio.iscoroutine(notifier):
-            async def _wrapped(request_id: str, payload: Dict[str, Any]) -> None:
-                # Drop the already-created coroutine, no-op to avoid TypeError
-                return None
-            return _wrapped
-
-        # If it's a normal callable (sync or async), use as-is
-        if callable(notifier):
-            return notifier
-
-        # Fallback: make a no-op async wrapper
-        async def _noop(request_id: str, payload: Dict[str, Any]) -> None:
-            return None
-        return _noop
+        self._websocket_manager = websocket_manager
 
     def _notify(self, request_id: str, payload: Dict[str, Any]) -> None:
         """
-        Schedule WebSocket notification safely regardless of sync/async context.
-        Ensures we always pass a coroutine to create_task and avoid calling a coroutine object.
+        Send a notification to all connected WebSocket clients using WebSocketManager.
+        Ensures proper behavior whether we're in an async or sync context.
         """
-        if not self._websocket_notifier:
-            return
+        # Include request_id in the payload
+        message = dict(payload)
+        message["request_id"] = request_id
 
-        async def _run():
-            await self._websocket_notifier(request_id, payload)
+        async def _send_all():
+            try:
+                await self._websocket_manager.send_message_all(message)
+            except Exception as e:
+                logger.exception("WebSocket broadcast failed for request_id=%s: %s", request_id, str(e))
 
         try:
             loop = asyncio.get_running_loop()
-            loop.create_task(_run())
         except RuntimeError:
-            # No running loop (e.g., called from a worker thread)
-            asyncio.run(_run())
+            loop = None
+
+        if loop is not None:
+            loop.create_task(_send_all())
+        else:
+            asyncio.run(_send_all())
 
     def add_task(self, task: Task) -> None:
         try:
@@ -521,14 +504,15 @@ class TaskManagerImpl(TaskManager):
                         "type": "task_enqueued",
                         "task_type": task.get_task_type(),
                         "success": True,
-                        "task_info": task.to_dict()
+                        "task_info": task.to_dict(),
                     })
         except Exception as e:
             logger.exception("Error adding task: %s", str(e))
             raise e
 
-    def start_task(self, task: Task) -> None:
+    def start_task(self, args: Dict[str, Any]) -> None:
         try:
+            task: Task = args['task']
             with self._lock:
                 task.start_processing()
                 query, parameters = task.get_update_cypher()
@@ -541,41 +525,40 @@ class TaskManagerImpl(TaskManager):
                     })
         except Exception as e:
             logger.exception("Error starting task: %s", str(e))
-            return False
 
-    def complete_task(self, task: Task, result: Dict[str, Any]) -> None:
+    def complete_task(self, args: Dict[str, Any]) -> None:
         try:
+            task: Task = args['task']
             with self._lock:
-                task.complete_with_result(result)
+                task.complete_with_result(args['result'])
                 query, parameters = task.get_update_cypher()
                 self._dao.update_task_record(query, parameters)
                 self._notify(task.request_id, {
                         "type": "task_completed",
                         "task_type": task.get_task_type(),
                         "success": True,
-                        "result": result,
+                        "result": args['result'],
                         "task_info": task.to_dict()
                     })
         except Exception as e:
             logger.exception("Error completing task: %s", str(e))
-            return False
 
-    def fail_task(self, task: Task, error: str) -> None:
+    def fail_task(self, args: Dict[str, Any]) -> None:
         try:
+            task: Task = args['task']
             with self._lock:
-                task.fail_with_error(error)
+                task.fail_with_error(args['error'])
                 query, properties = task.get_update_cypher()
                 self._dao.update_task_record(query, properties)
                 self._notify(task.request_id, {
                         "type": "task_failed",
                         "task_type": task.get_task_type(),
                         "success": False,
-                        "error": error,
+                        "error": args['error'],
                         "task_info": task.to_dict()
                     })
         except Exception as e:
             logger.exception("Error failing task: %s", str(e))
-            return False
 
     def cancel_task(self, request_id: str) -> None:
         try:
@@ -591,18 +574,19 @@ class TaskManagerImpl(TaskManager):
                             "success": True,
                             "task_info": task.to_dict()
                         })
-                return False
         except Exception as e:
             logger.exception("Error canceling task: %s", str(e))
-            return False
 
     def get_task(self, request_id: str) -> Optional[Task]:
         """Get a task by request ID."""
         with self._lock:
             return self._records.get(request_id)
 
-    def list_active_tasks(self) -> List[Task]:
+    def list_active_tasks(self, request_id: str) -> List[Task]:
         """Get all active (non-finished) tasks."""
+        logger.info("Listing active tasks for request_id: %s", request_id)
         with self._lock:
             return [task for task in self._records.values() if not task.is_finished]
 
+    def stop(self) -> None:
+        self._thread_pool.shutdown(wait=True)
