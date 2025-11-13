@@ -289,8 +289,8 @@ class RefreshTask(Task):
         try:
             self._listener.start_task({'task': self})
             if self._handler:
-                self._handler(self._request_id, self._project_id)
-            self._listener.complete_task({'task': self})
+                self._result = self._handler(self._request_id, self._project_id)
+            self._listener.complete_task({'task': self, 'result': self._result})
         except Exception as e:
             if self._listener:
                 self._listener.fail_task({'task': self, 'error': str(e)})
@@ -541,7 +541,7 @@ class TaskManagerImpl(TaskManager):
                         "task_info": task.to_dict()
                     })
         except Exception as e:
-            logger.exception("Error completing task: %s", str(e))
+            logger.exception("Error completing task: %s, task info: %s", str(e), str(args))
 
     def fail_task(self, args: Dict[str, Any]) -> None:
         try:

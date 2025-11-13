@@ -559,6 +559,7 @@
         let recentTasks = [];
         let startedAt = Date.now();
         let dbConnected = false;
+        let loadedProjects = new Set();
 
         // Directory Picker State
         let dirPickerCallback = null;
@@ -573,6 +574,17 @@
         const selectDirBtn = document.getElementById('selectDirBtn');
         const closeDirPicker = document.getElementById('closeDirPicker');
         const cancelDirPicker = document.getElementById('cancelDirPicker');
+
+        function renderProjectTabsAndPanels() {
+            projects.forEach(project => {
+                ensureProjectTab(project);
+                // Load documents only once per project at startup
+                if (!loadedProjects.has(project.project_id)) {
+                    loadedProjects.add(project.project_id);
+                    loadProjectDocuments(project);
+                }
+            });
+        }
 
         async function openDirectoryPicker(callback) {
             dirPickerCallback = callback;
@@ -772,24 +784,25 @@
                 const mem = navigator.deviceMemory ? (navigator.deviceMemory + ' GB (approx)') : 'N/A';
                 const healthEl = document.getElementById('serverHealth');
                 healthEl.innerHTML = `
+      <div>DB Connected: <b>${dbConnected ? 'Yes' : 'No'}</b></div>
+      <div>Uptime: <b>${upSeconds}s</b></div>
+      <div>Client Memory (approx): <b>${mem}</b></div>
+      <div>Load: <span class="muted">Client-side approximation only</span></div>
+    `;
+
+                const sysEl = document.getElementById('systemStatus');
+                if (sysEl) {
+                    sysEl.innerHTML = `
         <div>DB Connected: <b>${dbConnected ? 'Yes' : 'No'}</b></div>
         <div>Uptime: <b>${upSeconds}s</b></div>
         <div>Client Memory (approx): <b>${mem}</b></div>
         <div>Load: <span class="muted">Client-side approximation only</span></div>
       `;
-
-                const sysEl = document.getElementById('systemStatus');
-                if (sysEl) {
-                    sysEl.innerHTML = `
-          <div>DB Connected: <b>${dbConnected ? 'Yes' : 'No'}</b></div>
-          <div>Uptime: <b>${upSeconds}s</b></div>
-          <div>Client Memory (approx): <b>${mem}</b></div>
-          <div>Load: <span class="muted">Client-side approximation only</span></div>
-        `;
                 }
 
                 renderProjectTabsAndPanels();
-                projects.forEach(loadProjectDocuments);
+                // Remove this line - don't load documents on every refresh
+                // projects.forEach(loadProjectDocuments);
             } catch (e) {
                 console.error(e);
             }
@@ -1037,6 +1050,18 @@
                     } else if (t === 'task_completed' || t === 'task_failed' || t === 'task_cancelled') {
                         activeTasks.delete(reqId);
                         recentTasks.push(row);
+
+                        // Reload documents when file tasks complete
+                        if (t === 'task_completed' && row.project_id) {
+                            const taskType = row.task_type || '';
+                            if (taskType.includes('CreateFile') || taskType.includes('DeleteFile') ||
+                                taskType.includes('MoveFile') || taskType.includes('File')) {
+                                const proj = projects.find(p => p.project_id === row.project_id);
+                                if (proj) {
+                                    loadProjectDocuments(proj);
+                                }
+                            }
+                        }
                     }
                     // Handle document list response from ListDocumentsTask
                     if (t === 'task_completed' && (row.task_type === 'ListDocumentsTask')) {
@@ -1046,6 +1071,7 @@
                             const docs = Array.isArray(result.documentStore) ? result.documentStore : [];
                             const tbody = document.querySelector('#docs-' + pid + ' tbody');
                             if (tbody) {
+                                tbody.style.opacity = '1';
                                 if (!docs.length) {
                                     tbody.innerHTML = '<tr><td class="muted">No ingested documents found</td></tr>';
                                 } else {
